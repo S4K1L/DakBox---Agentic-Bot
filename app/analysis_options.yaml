@@ -1,0 +1,13 @@
+analyzer:
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - macos/**
+include: package:flutter_lints/flutter.yaml
+linter:
+  rules:
+    unnecessary_underscores: false
+    use_null_aware_elements: false
+    avoid_print: false
