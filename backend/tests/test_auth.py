@@ -2,7 +2,7 @@
 import httpx
 import pytest
 
-from app import db
+from app import db, registry
 from app.main import app
 
 PW = "correct-horse-battery"
@@ -47,9 +47,9 @@ async def member_token(http, owner_token, role):
 
 # ---------------------------------------------------------------- first run and sign-in
 async def test_first_owner_can_be_created_once_only(http):
-    assert (await http.get("/api/auth/status")).json() == {"setupRequired": True}
+    assert (await http.get("/api/auth/status")).json() == {"setupRequired": True, "hosted": False}
     await setup_owner(http)
-    assert (await http.get("/api/auth/status")).json() == {"setupRequired": False}
+    assert (await http.get("/api/auth/status")).json() == {"setupRequired": False, "hosted": False}
     r = await http.post("/api/auth/setup", json={"name": "Mallory", "email": "m@evil.test", "password": PW})
     assert r.status_code == 409
 
@@ -80,9 +80,9 @@ async def test_wrong_password_is_generic_and_throttled(http):
 
 async def test_tokens_are_not_stored_in_plaintext(http):
     t = await setup_owner(http)
-    rows = db.all("SELECT token_hash FROM sessions")
+    rows = registry._c().execute("SELECT token_hash FROM sessions").fetchall()
     assert rows and all(r["token_hash"] != t and len(r["token_hash"]) == 64 for r in rows)
-    stored = db.get("SELECT password_hash FROM users")["password_hash"]
+    stored = registry._c().execute("SELECT password_hash FROM accounts").fetchone()["password_hash"]
     assert stored.startswith("scrypt$") and PW not in stored
 
 
@@ -123,7 +123,7 @@ async def test_password_change_signs_out_other_devices(http):
 async def test_deactivated_members_are_locked_out_at_once(http):
     owner = await setup_owner(http)
     agent = await member_token(http, owner, "agent")
-    uid = db.get("SELECT id FROM users WHERE role='agent'")["id"]
+    uid = next(m["id"] for m in registry.members_of(registry.default_id()) if m["role"] == "agent")
     assert (await http.get("/api/me", headers=H(agent))).status_code == 200
     assert (await http.patch(f"/api/team/{uid}", headers=H(owner), json={"active": False})).status_code == 200
     assert (await http.get("/api/me", headers=H(agent))).status_code == 401
@@ -165,7 +165,7 @@ async def test_admin_can_decide_and_refund_but_cannot_touch_an_owner(http):
     appr = (await http.get("/api/approvals", headers=H(admin))).json()["items"][0]["id"]
     assert (await http.post(f"/api/approvals/{appr}/decide", headers=H(admin), json={"decision": "rejected"})).status_code == 200
     assert (await http.post("/api/orders/%231038/refund", headers=H(admin))).status_code == 200
-    owner_id = db.get("SELECT id FROM users WHERE role='owner'")["id"]
+    owner_id = next(m["id"] for m in registry.members_of(registry.default_id()) if m["role"] == "owner")
     assert (await http.patch(f"/api/team/{owner_id}", headers=H(admin), json={"role": "agent"})).status_code == 403
     assert (await http.post(f"/api/team/{owner_id}/reset-password", headers=H(admin), json={"password": "some-new-long-pass"})).status_code == 403
     r = await http.post("/api/team", headers=H(admin), json={"name": "Sneaky Owner", "email": "s@shop.test", "role": "owner", "password": PW})

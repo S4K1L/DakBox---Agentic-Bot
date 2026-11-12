@@ -30,7 +30,8 @@ def public_url() -> str | None:
 
 
 def webhook_url() -> str:
-    return f"{public_url() or 'https://YOUR-PUBLIC-URL'}/webhooks/meta"
+    from . import publicbiz
+    return f"{public_url() or 'https://YOUR-PUBLIC-URL'}/webhooks/meta{publicbiz.seg()}"
 
 
 def update(app_id_: str | None = None, app_secret_: str | None = None, verify_token_: str | None = None, public_url_: str | None = None) -> None:

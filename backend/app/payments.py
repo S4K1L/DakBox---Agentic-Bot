@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta, timezone
 
-from . import auth, db, domain, sms, store
+from . import auth, db, domain, publicbiz, sms, store
 from .events import emit
 from .providers import aamarpay, bkash, common, sslcommerz
 from .providers.common import ProviderError, Verified, same_amount
@@ -118,9 +118,10 @@ async def create_link(order_number: str, provider: str, by: str, base_url: str, 
         pid, tran = db.uid("pay"), common.new_tran_id(order_number)
         db.run("INSERT INTO payments(id,order_number,provider,amount,currency,tran_id,status,mode,created_at,created_by,conversation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                [pid, order_number, provider, amount, "BDT", tran, "created", cfg.get("mode"), db.now(), by, _conv_for(o)])
+        pay = f"{base_url}/pay{publicbiz.seg()}"          # this business's own return and IPN addresses
         urls = {
-            "success": f"{base_url}/pay/{provider}/success", "fail": f"{base_url}/pay/{provider}/fail", "cancel": f"{base_url}/pay/{provider}/cancel",
-            "ipn": f"{base_url}/pay/{provider}/ipn", "callback": f"{base_url}/pay/{provider}/callback",
+            "success": f"{pay}/{provider}/success", "fail": f"{pay}/{provider}/fail", "cancel": f"{pay}/{provider}/cancel",
+            "ipn": f"{pay}/{provider}/ipn", "callback": f"{pay}/{provider}/callback",
         }
         try:
             kw = dict(tran_id=tran, amount=amount, order_number=order_number, payment_id=pid, customer=_customer_dict(o), urls=urls)

@@ -33,7 +33,11 @@ def order(number: str) -> sqlite3.Row | None:
 def order_total(o: sqlite3.Row) -> tuple[int, int]:
     items = db.jl(o["items"], [])
     subtotal = sum(i["price"] * i["qty"] for i in items)
-    return subtotal, subtotal + o["shipping"]
+    try:
+        site = o["site_total"]          # an order from a website: what the customer was really charged (discounts, tax) wins
+    except (KeyError, IndexError):
+        site = None
+    return subtotal, site if site is not None else subtotal + o["shipping"]
 
 
 def add_message(
@@ -166,3 +170,27 @@ def order_log_status(number: str, mid: str, status: str) -> None:
         if line.get("m") == mid:
             line["s"] = status
     db.run("UPDATE orders SET log=? WHERE number=?", [db.dumps(log), number])
+
+
+ERASED = "[erased]"
+
+
+def erase_customer(cid: str) -> dict | None:
+    """Remove a customer's personal details from this business: name, phone, area, channel identities, the words of their messages, delivery name/phone/address on their orders,
+    and their phone number in the SMS log. Orders, amounts and stock history stay (they are the shop's accounts), attached to an anonymous customer. Returns what was changed, or None if there is no such customer here."""
+    c = customer(cid)
+    if not c:
+        return None
+    phone = c["phone"]
+    with db.tx():
+        convs = [r["id"] for r in db.all("SELECT id FROM conversations WHERE customer_id=?", [cid])]
+        n_msgs = 0
+        for cv in convs:
+            n_msgs += db.run("UPDATE messages SET text=?, translation=NULL, meta=NULL, author=CASE WHEN role='customer' THEN ? ELSE author END WHERE conversation_id=?", [ERASED, ERASED, cv]).rowcount
+        db.run("UPDATE conversations SET preview=?, summary=NULL, pending=NULL, cart='[]', checkout=NULL, handoff_reason=NULL WHERE customer_id=?", [ERASED, cid])
+        n_orders = db.run("UPDATE orders SET address=?, ship_name=NULL, ship_phone=NULL WHERE customer_id=?", [ERASED, cid]).rowcount
+        n_sms = db.run("UPDATE sms_messages SET to_phone=?, body=? WHERE to_phone=?", [ERASED, ERASED, phone]).rowcount if phone else 0
+        db.run("UPDATE approvals SET said=NULL, said_tr=NULL, attachment=NULL WHERE customer_id=?", [cid])
+        db.run("DELETE FROM identities WHERE customer_id=?", [cid])
+        db.run("UPDATE customers SET name=?, phone=NULL, area=NULL, external_id=NULL, channel_kind=NULL, tags='[]' WHERE id=?", ["Erased customer", cid])
+    return {"messages": n_msgs, "orders": n_orders, "sms": n_sms, "conversations": len(convs)}

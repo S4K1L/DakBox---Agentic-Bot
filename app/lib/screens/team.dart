@@ -60,7 +60,7 @@ class _TeamScreenState extends State<TeamScreen> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         PageHeader(
           title: 'Team',
-          subtitle: Text('${plural(s.team.length, 'person', 'people')} · you decide who can reply, approve money and change settings.', style: TypeX.ui(13.5, color: c.text3)),
+          subtitle: Text('${plural(s.team.length, 'person', 'people')}${s.seats != null && s.seats!['limit'] != null ? ' · ${s.seats!['used']} of ${s.seats!['limit']} seats used' : ''} · you decide who can reply, approve money and change settings.', style: TypeX.ui(13.5, color: c.text3)),
           actions: [DkButton('Invite someone', icon: PhosphorIconsBold.userPlus, kind: BtnKind.primary, onPressed: () => showDialog<void>(context: context, barrierColor: Colors.black.withValues(alpha: .45), builder: (_) => const _InviteDialog()))],
         ),
         Expanded(

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from .. import checkout, db, store
 from ..util import DISTRICTS, detect_lang, from_bn_digits, is_dhaka, taka, to_bn_digits
+from . import catalog_search
 from .tools import ToolCtx, call_tool
 
 
@@ -41,6 +42,9 @@ RX = {
     "payment": re.compile(r"bkash|nagad|\bcod\b|cash on|payment|পেমেন্ট|বিকাশ|ক্যাশ", I),
     "greeting": re.compile(r"assalam|আসসালামু|^hi\b|^hello|^hey|^salam", I),
     "waterproof": re.compile(r"waterproof|ওয়াটারপ্রুফ|পানি", I),
+    "detail": re.compile(r"detail|description|describe|material|fabric|quality|length|width|weight|made of|about (it|this|the)|spec|বিস্তারিত|কাপড়|কেমন|মান|সাইজ|ডিটেইল|bistarito|kapor|kemon|details", I),
+    "browse": re.compile(r"what (do|all|else) (you|u) (sell|have|offer)|what.{0,20}(products|items|collection|catalog)|(show|see|send).{0,15}(products|collection|catalog|items)|\b(catalog|catalogue|collection|new arrivals?|best ?sellers?)\b|ki ki (ache|bikri|paoa|pawa)|ki ki|কি কি আছে|কী কী আছে|কি কি বিক্রি|কালেকশন|ক্যাটালগ|কী কী পাওয়া|কিছু দেখান|kichu dekhan|sob product|সব পণ্য", I),
+    "inquiry": re.compile(r"\b(have|has|available|in stock|price|cost|how much|show|looking|want|need|buy|get|sell|is there|do you)\b|ache\b|achhe|\base\b|koto|\bdam\b|dekhan|dekhao|chai\b|lagbe|kinbo|kinte|আছে|দাম|কত|দেখান|দেখাও|চাই|লাগবে|কিনব|কিনতে|পাওয়া যায়|পাব|\?", I),
     "policy_q": re.compile(r"\bpolicy\b|korte parbo|করতে পারব|ferot dewa jay|যাবে কি|can i return", I),
 }
 
@@ -148,12 +152,67 @@ def _order_number(texts: list[str]) -> str | None:
 
 
 def _product_from_text(text: str) -> str | None:
-    for key, rx in ALIASES.items():
-        if rx.search(text):
-            p = db.get("SELECT sku FROM products WHERE keywords LIKE ? OR lower(name) LIKE ? ORDER BY stock DESC LIMIT 1", [f"%{key}%", f"%{key}%"])
-            if p:
-                return p["sku"]
-    return None
+    """The one product the customer's words clearly point to (any catalogue), or None when it is unclear."""
+    return catalog_search.best_unique(text)
+
+
+def _stock_phrase(p) -> tuple[str, str, str]:
+    n = p["stock"]
+    if n == 0:
+        return ("স্টকে নেই", "stock e nei", "out of stock")
+    if n <= 3:
+        return (f"মাত্র {n}টি আছে", f"matro {n}ta ache", f"only {n} left")
+    return ("স্টকে আছে", "stock e ache", "in stock")
+
+
+def _first_sentences(text: str | None, n: int = 2) -> str:
+    parts = re.split(r"(?<=[.।!?])\s+", (text or "").strip())
+    return " ".join(parts[:n]).strip()
+
+
+def _one_product_reply(reply, name: str, variants: list, detail: bool, text: str, closest: bool, said: list[str]):
+    p0 = variants[0]
+    ins = [p for p in variants if p["stock"] > 0]
+    desc = (p0["description"] or "").strip()
+    d_en = f" {desc if detail else _first_sentences(desc, 1)}" if desc else ""
+    pre_bn = pre_bl = pre_en = ""
+    if closest and said:
+        w = ", ".join(said)
+        pre_bn, pre_bl, pre_en = f"\"{w}\" ঠিক মেলেনি, কাছাকাছি: ", f"\"{w}\" thik melenai, kachakachi: ", f"Nothing matched \"{w}\" exactly; the closest is: "
+    if len(variants) == 1:
+        p = variants[0]
+        v = f" ({p['variant']})" if p["variant"] else ""
+        if p["stock"] == 0:
+            return reply(f"{pre_bn}দুঃখিত, {name}{v} এখন স্টকে নেই। স্টকে এলে আপনাকে জানাব?", f"{pre_bl}Dukkhito, {name}{v} ekhon stock e nei. Stock e ashle apnake janabo?",
+                         f"{pre_en}{name}{v} is out of stock right now. I can tell you as soon as it is back. Would you like that?", product_sku=p["sku"])
+        return reply(f"{pre_bn}জি, {name}{v} আছে। এখন স্টকে {p['stock']}টি আছে, দাম {taka(p['price'], True)}।{d_en if desc else ''} কার্টে যোগ করে দেব?",
+                     f"{pre_bl}Ji, {name}{v} ache. Ekhon stock e {p['stock']}ta ache, dam {taka(p['price'])}.{d_en if desc else ''} Cart e add kore dei?",
+                     f"{pre_en}Yes, the {name}{v} is available. {p['stock']} in stock at {taka(p['price'])}.{d_en} Shall I add it to your cart?", product_sku=p["sku"])
+    opts_en = "; ".join(f"{p['variant'] or name} {taka(p['price'])}" + ("" if p["stock"] > 0 else " (out of stock)") for p in variants[:6])
+    opts_bn = "; ".join(f"{p['variant'] or name} {taka(p['price'], True)}" + ("" if p["stock"] > 0 else " (স্টকে নেই)") for p in variants[:6])
+    opts_bl = "; ".join(f"{p['variant'] or name} {taka(p['price'])}" + ("" if p["stock"] > 0 else " (stock e nei)") for p in variants[:6])
+    tail_en = "Which one would you like?" if ins else "All of them are out of stock right now. Want me to tell you when one is back?"
+    tail_bn = "কোনটি নেবেন?" if ins else "এখন সবই স্টকে নেই। স্টকে এলে জানাব?"
+    tail_bl = "Kon ta nite chan?" if ins else "Ekhon sob stock e nei. Stock e ashle janabo?"
+    return reply(f"{pre_bn}{name} পাওয়া যায়: {opts_bn}।{d_en if desc and detail else ''} {tail_bn}", f"{pre_bl}{name} paoa jay: {opts_bl}.{d_en if desc and detail else ''} {tail_bl}",
+                 f"{pre_en}The {name} comes in: {opts_en}.{d_en if desc and detail else ''} {tail_en}", product_sku=(ins[0]["sku"] if len(ins) == 1 else None))
+
+
+def _list_reply(reply, groups: list, closest: bool, said: list[str]):
+    def one(name, vs, bn):
+        lo = min(p["price"] for p in vs)
+        price = taka(lo, bn)
+        more = (f" ({len(vs)} {'টি অপশন' if bn else 'options'})" if len(vs) > 1 else (f" ({vs[0]['variant']})" if vs[0]["variant"] else ""))
+        gone = " (out of stock)" if all(p["stock"] == 0 for p in vs) else ""
+        return f"{name}{more} {'from ' if len(vs) > 1 and len({p['price'] for p in vs}) > 1 else ''}{price}{gone}"
+    en = "; ".join(one(n, vs, False) for n, vs in groups)
+    bn = "; ".join(one(n, vs, True) for n, vs in groups)
+    pre_en = pre_bn = pre_bl = ""
+    if closest and said:
+        w = ", ".join(said)
+        pre_bn, pre_bl, pre_en = f"\"{w}\" ঠিক মেলেনি। কাছাকাছি: ", f"\"{w}\" thik melenai. Kachakachi: ", f"Nothing matched \"{w}\" exactly. The closest: "
+    return reply(f"{pre_bn}আমাদের কাছে আছে: {bn}। কোনটি সম্পর্কে জানতে চান?", f"{pre_bl}Amader kache ache: {bn}. Kon ta somporke jante chan?",
+                 f"{pre_en}We have: {en}. Which one would you like to know more about?", confidence=85)
 
 
 def run_offline(ctx: ToolCtx, history: list, settings: dict) -> EngineResult:
@@ -395,24 +454,26 @@ def run_offline(ctx: ToolCtx, history: list, settings: dict) -> EngineResult:
         call_tool(ctx, "get_policy", topic="payment")
         return reply("আপনি ক্যাশ অন ডেলিভারি, বিকাশ, নগদ বা কার্ডে পেমেন্ট করতে পারবেন। অনলাইন পেমেন্টে আমরা শুধু অফিসিয়াল পেমেন্ট লিংক পাঠাই, আপনার পিন বা ওটিপি কাউকে দেবেন না।", "Apni cash on delivery, bKash, Nagad ba card e pay korte parben. Online payment e amra shudhu official payment link pathai, apnar PIN ba OTP kauke debena na.", "You can pay by cash on delivery, bKash, Nagad or card. For online payments we only send official payment links. Never share your PIN or OTP with anyone.")
 
-    # 11. product questions
-    wanted = _product_from_text(text)
-    if wanted:
-        out = call_tool(ctx, "search_products", query=wanted)
-        hit = out.result["products"][0] if out.result["products"] else None
-        if hit:
-            p = store.product(hit["sku"])
-            v = p["variant"] or ""
-            if RX["waterproof"].search(text) and p["description"]:
-                return reply(f"জি, {p['name']}: {p['description']}", f"Ji, {p['name']}: {p['description']}", f"Yes. {p['name']}: {p['description']}", product_sku=p["sku"])
-            if p["stock"] == 0:
-                return reply(f"দুঃখিত, {p['name']} ({v}) এখন স্টকে নেই। স্টকে এলে আপনাকে জানাব?", f"Dukkhito, {p['name']} ({v}) ekhon stock e nei. Stock e ashle apnake janabo?", f"{p['name']} ({v}) is out of stock right now. I can tell you as soon as it is back. Would you like that?", product_sku=p["sku"])
-            return reply(
-                f"জি, {p['name']} ({v}) আছে। এখন স্টকে {p['stock']}টি আছে, দাম {taka(p['price'], True)}। কার্টে যোগ করে দেব?",
-                f"Ji, {p['name']} ({v}) ache. Ekhon stock e {p['stock']}ta ache, dam {taka(p['price'])}. Cart e add kore dei?",
-                f"Yes, the {p['name']} ({v}) is available. {p['stock']} in stock at {taka(p['price'])}. Shall I add it to your cart?",
-                product_sku=p["sku"],
-            )
+    # 11. product questions, for whatever this store sells: one product, its variants, a short list, or an honest "we do not have that"
+    sr = catalog_search.search(text)
+    wants_list = bool(RX["browse"].search(text))
+    if sr.rows and (sr.content or wants_list) and not (sr.browse and not wants_list):
+        groups = catalog_search.group_by_name(sr.rows)
+        detail = bool(RX["detail"].search(text))
+        if sr.browse or len(groups) > 1 or not sr.matched_all and len(groups) > 1:
+            return _list_reply(reply, groups[:4], closest=not sr.matched_all and not sr.browse, said=sr.unmatched)
+        name, variants = groups[0]
+        return _one_product_reply(reply, name, variants, detail, text, closest=not sr.matched_all, said=sr.unmatched)
+    if sr.content and not sr.rows and (RX["inquiry"].search(text) or len(sr.content) <= 3 and not RX["thanks"].search(text)):
+        ov = catalog_search.overview(5)
+        lst = ", ".join(ov["examples"])
+        asked = " ".join(sr.content[:3])
+        return reply(
+            f"দুঃখিত, \"{asked}\" আমাদের কালেকশনে খুঁজে পাইনি। আমাদের কাছে আছে: {lst}। এগুলোর মধ্যে কিছু দেখাব, নাকি একজন সহকর্মীকে জিজ্ঞেস করব?",
+            f"Dukkhito, \"{asked}\" amader collection e khuje painai. Amader kache ache: {lst}. Egulor moddhe kichu dekhabo, naki ekjon sohokormi ke jiggesh korbo?",
+            f"Sorry, I could not find \"{asked}\" in our collection. We have: {lst}. Shall I show you one of these, or ask a teammate?",
+            confidence=70,
+        )
 
     # 12. greeting
     if RX["greeting"].search(text.strip()) or len(text.strip()) < 4:

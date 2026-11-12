@@ -11,7 +11,7 @@ os.environ.pop("ANTHROPIC_API_KEY", None)  # tests run the offline engine
 import pytest  # noqa: E402
 
 import httpx  # noqa: E402
-from app import auth, db, domain, meta, metacfg, seed, store  # noqa: E402
+from app import auth, db, domain, meta, metacfg, registry, seed, store  # noqa: E402
 from tools.fake_graph import FakeGraph  # noqa: E402
 from tools.fake_providers import AAM, ALPHA, BK, SF, SSL, SSLW, FakeProviders  # noqa: E402
 from app.providers import common as pcommon  # noqa: E402
@@ -22,6 +22,7 @@ def fresh():
     seed.seed()
     for t in ("sessions", "audit", "users"):
         db.run(f"DELETE FROM {t}")
+    registry.reset_accounts()
     auth._fails.clear()
     meta._tpl_cache.clear()
     yield

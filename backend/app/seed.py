@@ -11,9 +11,57 @@ H = lambda n: n * 60  # noqa: E731
 D = lambda n: n * 1440  # noqa: E731
 
 
+INTEGRATIONS = [
+            ("steadfast", "Couriers", "Steadfast", "S", "off", "Not connected."),
+            ("pathao", "Couriers", "Pathao", "P", "off", "Not built."),
+            ("redx", "Couriers", "RedX", "R", "off", "Not built."),
+            ("paperfly", "Couriers", "Paperfly", "P", "off", "Not built."),
+            ("ecourier", "Couriers", "eCourier", "E", "off", "Not built."),
+            ("bkash", "Payments", "bKash", "b", "off", "Not connected."),
+            ("sslcommerz", "Payments", "SSLCOMMERZ", "S", "off", "Not connected."),
+            ("cod", "Payments", "Cash on delivery", "C", "ok", "On in all districts. Confirmed by phone before booking."),
+            ("aamarpay", "Payments", "aamarPay", "a", "off", "Not connected."),
+            ("nagad", "Payments", "Nagad", "N", "off", "Not built."),
+            ("sslwireless", "SMS", "SSL Wireless (ISMS Plus)", "S", "off", "Not connected."),
+            ("alphasms", "SMS", "Alpha SMS", "A", "off", "Not connected."),
+            ("gp", "SMS", "Grameenphone Corporate Messaging", "G", "off", "Not built."),
+            ("banglalink", "SMS", "Banglalink / Robi corporate SMS", "R", "off", "Not built."),
+            ("chatorders", "Store", "Orders taken in chat", "C", "ok", "For pages without a website. The assistant saves orders here."),
+        ]
+
+NOTIFICATIONS = [
+    {"e": "Order placed", "sms": 1, "wa": 0, "em": 0}, {"e": "Payment failed", "sms": 1, "wa": 0, "em": 0}, {"e": "Shipped", "sms": 1, "wa": 1, "em": 0},
+    {"e": "Out for delivery", "sms": 1, "wa": 0, "em": 0}, {"e": "Delivered", "sms": 1, "wa": 0, "em": 1}, {"e": "Refund issued", "sms": 1, "wa": 0, "em": 1},
+]
+
+def bootstrap(name: str) -> None:
+    """The standard starting setup for a brand-new business: no products, customers or conversations, just the connection cards,
+    the website chat, default settings and honest placeholder policies (the assistant tells customers a teammate will confirm anything not written yet)."""
+    with db.tx():
+        for id_, grp, nm, letter, st, note in INTEGRATIONS:
+            db.run("INSERT OR IGNORE INTO integrations(id,grp,name,letter,status,note) VALUES(?,?,?,?,?,?)", [id_, grp, nm, letter, st, note])
+        db.run("INSERT OR IGNORE INTO channels(id,kind,name,handle,status,health,alert,last_message_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+               ["ch_web", "web", "Web chat", name, "ok", dumps([["Widget", "Ready", "ok"]]), None, db.now(), db.now()])
+        for k, t, b in [("returns", "Returns policy", "Not written yet. Tell the customer a teammate will confirm the return rules."),
+                        ("exchange", "Exchange policy", "Not written yet. Tell the customer a teammate will confirm the exchange rules."),
+                        ("pricing", "Pricing policy", "Prices are as shown. Discounts and price matches are decided by a teammate."),
+                        ("shipping", "Shipping policy", "Not written yet. Use the delivery estimate tool for charges, and a teammate for anything else."),
+                        ("payment", "Payment policy", "Cash on delivery is available. Online payments only through official payment links. Staff never ask for a PIN, OTP or card number.")]:
+            db.run("INSERT OR IGNORE INTO policies(key,title,body) VALUES(?,?,?)", [k, t, b])
+        db.set_setting("agent", {**DEFAULT_SETTINGS, "storeName": name})
+        db.set_setting("notifications", NOTIFICATIONS)
+        db.set_setting("onboarding", {"show": True, "dismissed": False, "marks": []})      # a new business starts with the setup guide
+
+
 def seed_if_empty() -> None:
-    if db.get("SELECT COUNT(*) AS n FROM channels")["n"] == 0:
-        seed()
+    """A brand-new install gets the demo shop; a hosted one gets a blank business instead (no demo customers on someone's real server)."""
+    from . import registry
+    with db.business(registry.default_id()):               # (a strict install has no business selected at start-up)
+        if db.get("SELECT COUNT(*) AS n FROM channels")["n"] == 0:
+            if db.hosted():
+                bootstrap("Default business")
+            else:
+                seed()
 
 
 def seed() -> None:
@@ -194,32 +242,11 @@ def seed() -> None:
            "Pricing policy 1.4: Price matches are considered for identical items from authorized sellers, with a link as proof. Maximum adjustment ৳1,000.", None, 1440)
 
         # ---------------------------------------------------------------- integrations
-        for id_, grp, name, letter, st, note in [
-            ("steadfast", "Couriers", "Steadfast", "S", "off", "Not connected."),
-            ("pathao", "Couriers", "Pathao", "P", "off", "Not built."),
-            ("redx", "Couriers", "RedX", "R", "off", "Not built."),
-            ("paperfly", "Couriers", "Paperfly", "P", "off", "Not built."),
-            ("ecourier", "Couriers", "eCourier", "E", "off", "Not built."),
-            ("bkash", "Payments", "bKash", "b", "off", "Not connected."),
-            ("sslcommerz", "Payments", "SSLCOMMERZ", "S", "off", "Not connected."),
-            ("cod", "Payments", "Cash on delivery", "C", "ok", "On in all districts. Confirmed by phone before booking."),
-            ("aamarpay", "Payments", "aamarPay", "a", "off", "Not connected."),
-            ("nagad", "Payments", "Nagad", "N", "off", "Not built."),
-            ("sslwireless", "SMS", "SSL Wireless (ISMS Plus)", "S", "off", "Not connected."),
-            ("alphasms", "SMS", "Alpha SMS", "A", "off", "Not connected."),
-            ("gp", "SMS", "Grameenphone Corporate Messaging", "G", "off", "Not built."),
-            ("banglalink", "SMS", "Banglalink / Robi corporate SMS", "R", "off", "Not built."),
-            ("woo", "Store", "WooCommerce", "W", "ok", "Catalog, stock and orders synced 2 min ago."),
-            ("shopify", "Store", "Shopify", "S", "off", "Not connected."),
-            ("chatorders", "Store", "Orders taken in chat", "C", "ok", "For pages without a website. The assistant saves orders here."),
-        ]:
+        for id_, grp, name, letter, st, note in INTEGRATIONS:
             db.run("INSERT INTO integrations(id,grp,name,letter,status,note) VALUES(?,?,?,?,?,?)", [id_, grp, name, letter, st, note])
 
         db.set_setting("agent", DEFAULT_SETTINGS)
-        db.set_setting("notifications", [
-            {"e": "Order placed", "sms": 1, "wa": 0, "em": 0}, {"e": "Payment failed", "sms": 1, "wa": 0, "em": 0}, {"e": "Shipped", "sms": 1, "wa": 1, "em": 0},
-            {"e": "Out for delivery", "sms": 1, "wa": 0, "em": 0}, {"e": "Delivered", "sms": 1, "wa": 0, "em": 1}, {"e": "Refund issued", "sms": 1, "wa": 0, "em": 1},
-        ])
+        db.set_setting("notifications", NOTIFICATIONS)
         db.set_setting("insights_history", {
             "handled": [34, 36, 35, 39, 41, 40, 44, 46, 45, 49, 52, 51, 55, 58],
             "reasons": [["Refund or complaint", 41], ["Asked for a person", 27], ["Request outside policy", 18], ["Low confidence", 14]],

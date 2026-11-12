@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../brand/icons.dart';
@@ -5,6 +6,7 @@ import '../brand/theme.dart';
 import '../core/state.dart';
 import '../shell/shell.dart' show Brand;
 import '../widgets/kit.dart';
+import 'auth_hero.dart';
 
 /// Sign in, first-run owner setup and the forced password change share one layout.
 class AuthScreen extends StatelessWidget {
@@ -16,6 +18,7 @@ class AuthScreen extends StatelessWidget {
     final form = switch (s.phase) {
       Phase.setup => const _SetupForm(),
       Phase.mustChange => const _ChangeForm(),
+      Phase.pickBusiness => const _PickBusiness(),
       _ => const _LoginForm(),
     };
     return Scaffold(
@@ -34,81 +37,8 @@ class AuthScreen extends StatelessWidget {
           ),
         );
         if (!wide) return formPane;
-        return Row(children: [Expanded(flex: 11, child: const _Hero()), Expanded(flex: 9, child: formPane)]);
+        return Row(children: [Expanded(flex: 11, child: AuthHero(setup: s.phase == Phase.setup)), Expanded(flex: 9, child: formPane)]);
       }),
-    );
-  }
-}
-
-class _Hero extends StatelessWidget {
-  const _Hero();
-  @override
-  Widget build(BuildContext context) {
-    final c = context.c;
-    return Container(
-      decoration: BoxDecoration(gradient: c.hero),
-      clipBehavior: Clip.antiAlias,
-      child: Stack(children: [
-        Positioned(right: -120, top: -140, child: Container(width: 460, height: 460, decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white.withValues(alpha: .06)))),
-        Positioned(left: -140, bottom: -180, child: Container(width: 520, height: 520, decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white.withValues(alpha: .05)))),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(64, 56, 64, 48),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Brand(),
-            const Spacer(),
-            Reveal(child: Text('Every chat.\nOne inbox.', style: TypeX.display(60, color: Colors.white, h: 1.02, ls: -.04))),
-            const Gap(18),
-            Reveal(delay: 120, child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 460), child: Text('WhatsApp, Messenger, Instagram and your website, answered in Bangla, Banglish and English by an assistant that actually does the work, and hands over to your team when it should.', style: TypeX.ui(16, color: Colors.white.withValues(alpha: .82), h: 1.55)))),
-            const Gap(36),
-            const Reveal(delay: 240, child: _Bubble(kind: 'wa', who: 'Rakib', text: 'bhai amar order ta kothay? #1042', align: Alignment.centerLeft)),
-            const Gap(10),
-            const Reveal(delay: 340, child: _Bubble(kind: 'ai', who: 'Assistant', text: 'Apnar order Steadfast e ache, kal pouchabe. Tracking SF-26110841', align: Alignment.centerRight)),
-            const Gap(10),
-            const Reveal(delay: 440, child: _Bubble(kind: 'ms', who: 'Nusrat', text: 'একটা কার্টে দিয়ে দিন প্লিজ', align: Alignment.centerLeft)),
-            const Spacer(),
-            Row(children: [
-              for (final k in ['wa', 'ms', 'ig', 'web']) Padding(padding: const EdgeInsets.only(right: 10), child: ChannelIcon(kind: k, size: 30)),
-              const Gap(6),
-              Text('and one assistant for all of them', style: TypeX.ui(13, color: Colors.white.withValues(alpha: .7))),
-            ]),
-          ]),
-        ),
-      ]),
-    );
-  }
-}
-
-class _Bubble extends StatelessWidget {
-  const _Bubble({required this.kind, required this.who, required this.text, required this.align});
-  final String kind, who, text;
-  final Alignment align;
-  @override
-  Widget build(BuildContext context) {
-    final ai = kind == 'ai';
-    final bn = RegExp(r'[ঀ-৿]').hasMatch(text);
-    return Align(
-      alignment: align,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 400),
-        padding: const EdgeInsets.fromLTRB(12, 10, 16, 10),
-        decoration: BoxDecoration(
-          color: ai ? Colors.white : Colors.white.withValues(alpha: .13),
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white.withValues(alpha: ai ? 0 : .18)),
-          boxShadow: ai ? [BoxShadow(color: Colors.black.withValues(alpha: .25), blurRadius: 30, offset: const Offset(0, 14), spreadRadius: -10)] : null,
-        ),
-        child: Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          ai ? const AiMark(size: 26) : ChannelIcon(kind: kind, size: 26, circle: true),
-          const SizedBox(width: 10),
-          Flexible(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(who, style: TypeX.ui(11.5, w: FontWeight.w800, color: ai ? const Color(0xFF3558FA) : Colors.white70)),
-              const SizedBox(height: 2),
-              Text(text, style: bn ? TypeX.bn(14, color: Colors.white) : TypeX.ui(14, color: ai ? const Color(0xFF0D1230) : Colors.white)),
-            ]),
-          ),
-        ]),
-      ),
     );
   }
 }
@@ -129,13 +59,28 @@ class _Field extends StatefulWidget {
 
 class _FieldState extends State<_Field> {
   bool hide = true;
+  final _focus = FocusNode();
+  bool _focused = false;
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(() { if (mounted) setState(() => _focused = _focus.hasFocus); });
+  }
+
+  @override
+  void dispose() { _focus.dispose(); super.dispose(); }
+
   @override
   Widget build(BuildContext context) {
     final c = context.c;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(widget.label, style: TypeX.ui(12.5, w: FontWeight.w700, color: c.text2)),
+      Text(widget.label, style: TypeX.ui(12.5, w: FontWeight.w700, color: _focused ? c.primary : c.text2)),
       const SizedBox(height: 6),
-      TextField(
+      AnimatedContainer(
+        duration: const Duration(milliseconds: 180), curve: Curves.easeOut,
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(16), boxShadow: [if (_focused) BoxShadow(color: c.primary.withValues(alpha: .18), blurRadius: 0, spreadRadius: 4)]),
+        child: TextField(
+        focusNode: _focus,
         controller: widget.controller, obscureText: widget.password && hide, autofocus: widget.autofocus, autofillHints: widget.hints,
         textInputAction: widget.action, keyboardType: widget.type, enableSuggestions: !widget.password, autocorrect: !widget.password,
         onSubmitted: (_) => widget.onSubmit?.call(), style: TypeX.ui(15, color: c.text), cursorColor: c.primary,
@@ -146,7 +91,7 @@ class _FieldState extends State<_Field> {
           enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: c.line2)),
           focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: c.primary, width: 1.8)),
         ),
-      ),
+      )),
     ]);
   }
 }
@@ -157,28 +102,38 @@ class _ErrorBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.c;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16), padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(color: c.dangerSoft, borderRadius: BorderRadius.circular(12), border: Border.all(color: c.danger.withValues(alpha: .25))),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Icon(PhosphorIconsFill.warningCircle, size: 18, color: c.danger), const SizedBox(width: 10),
-        Expanded(child: Text(text, style: TypeX.ui(13, w: FontWeight.w600, color: c.text))),
-      ]),
+    return TweenAnimationBuilder<double>(
+      key: ValueKey(text), tween: Tween(begin: 0, end: 1), duration: const Duration(milliseconds: 520),
+      builder: (_, t, child) => Opacity(opacity: t.clamp(0, 1), child: Transform.translate(offset: Offset(math.sin(t * math.pi * 5) * (1 - t) * 9, 0), child: child)),   // a short shake: the sign-in did not work
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 16), padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(color: c.dangerSoft, borderRadius: BorderRadius.circular(12), border: Border.all(color: c.danger.withValues(alpha: .25))),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(PhosphorIconsFill.warningCircle, size: 18, color: c.danger), const SizedBox(width: 10),
+          Expanded(child: Text(text, style: TypeX.ui(13, w: FontWeight.w600, color: c.text))),
+        ]),
+      ),
     );
   }
 }
 
 class _Head extends StatelessWidget {
-  const _Head({required this.title, required this.body});
+  const _Head({required this.title, required this.body, this.eyebrow});
   final String title, body;
+  final String? eyebrow;                       // a small label above the title, e.g. the first-run step
   @override
   Widget build(BuildContext context) {
     final c = context.c;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       if (MediaQuery.of(context).size.width < 960) ...[const Brand(light: false), const Gap(32)],
-      Text(title, style: TypeX.display(32, color: c.text, ls: -.03)),
+      if (eyebrow != null) Reveal(child: Padding(padding: const EdgeInsets.only(bottom: 14), child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(color: c.primarySoft, borderRadius: BorderRadius.circular(20)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(PhosphorIconsFill.sparkle, size: 12, color: c.primary), const SizedBox(width: 6), Text(eyebrow!, style: TypeX.ui(11, w: FontWeight.w800, color: c.primary, ls: .6))]),
+      ))),
+      Reveal(child: Text(title, style: TypeX.display(32, color: c.text, ls: -.03))),
       const Gap(8),
-      Text(body, style: TypeX.ui(14.5, color: c.text3, h: 1.5)),
+      Reveal(delay: 70, child: Text(body, style: TypeX.ui(14.5, color: c.text3, h: 1.5))),
       const Gap(28),
     ]);
   }
@@ -236,14 +191,22 @@ class _LoginFormState extends State<_LoginForm> {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const _Head(title: 'Welcome back', body: 'Sign in to your team’s inbox.'),
       if (s.authError != null) _ErrorBox(s.authError!),
-      _Field(label: 'Email', controller: email, hints: const [AutofillHints.username, AutofillHints.email], type: TextInputType.emailAddress, autofocus: true),
+      Reveal(delay: 120, child: _Field(label: 'Email', controller: email, hints: const [AutofillHints.username, AutofillHints.email], type: TextInputType.emailAddress, autofocus: true)),
       const Gap(16),
-      _Field(label: 'Password', controller: pw, password: true, hints: const [AutofillHints.password], action: TextInputAction.done, onSubmit: _go),
+      Reveal(delay: 180, child: _Field(label: 'Password', controller: pw, password: true, hints: const [AutofillHints.password], action: TextInputAction.done, onSubmit: _go)),
       const Gap(24),
-      DkButton(s.authBusy ? 'Signing in…' : 'Sign in', icon: PhosphorIconsBold.arrowRight, kind: BtnKind.primary, expand: true, onPressed: s.authBusy ? null : _go),
+      Reveal(delay: 240, child: DkButton(s.authBusy ? 'Signing in…' : 'Sign in', icon: PhosphorIconsBold.arrowRight, kind: BtnKind.primary, expand: true, onPressed: s.authBusy ? null : _go)),
       if (s.offline) ...[const Gap(12), DkButton('Retry connection', kind: BtnKind.ghost, expand: true, onPressed: s.retryConnection)],
-      const Gap(24),
-      Text('Forgot your password? Ask an owner or admin on your team to reset it for you.', style: TypeX.ui(12.5, color: c.text3, h: 1.5)),
+      const Gap(26),
+      Reveal(delay: 300, child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: c.surface2, borderRadius: BorderRadius.circular(14), border: Border.all(color: c.line)),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(PhosphorIconsRegular.key, size: 17, color: c.text3),
+          const SizedBox(width: 10),
+          Expanded(child: Text('Forgot your password, or need access? Ask an owner or admin of your business: they can reset it or invite you.', style: TypeX.ui(12.5, color: c.text3, h: 1.5))),
+        ]),
+      )),
     ]);
   }
 }
@@ -279,19 +242,38 @@ class _SetupFormState extends State<_SetupForm> {
     final c = context.c;
     final err = localError ?? s.authError;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const _Head(title: 'Set up your workspace', body: 'Create the owner account. You can add teammates and choose what each of them can do afterwards.'),
+      _Head(eyebrow: s.hostedServer ? 'SUPER ADMIN SETUP' : 'FIRST-TIME SETUP', title: s.hostedServer ? 'Create the super admin' : 'Create your workspace', body: s.hostedServer ? 'This account runs the whole server: it creates businesses and their owners, sets plans and looks after everyone. Businesses are created afterwards from its panel.' : 'Make the owner account. You can invite teammates and choose what each of them can do afterwards.'),
       if (err != null) _ErrorBox(err),
-      _Field(label: 'Your name', controller: name, hints: const [AutofillHints.name], autofocus: true),
+      Reveal(delay: 100, child: _Field(label: 'Your name', controller: name, hints: const [AutofillHints.name], autofocus: true)),
       const Gap(14),
-      _Field(label: 'Work email', controller: email, hints: const [AutofillHints.username, AutofillHints.email], type: TextInputType.emailAddress),
+      Reveal(delay: 150, child: _Field(label: 'Work email', controller: email, hints: const [AutofillHints.username, AutofillHints.email], type: TextInputType.emailAddress)),
       const Gap(14),
-      ListenableBuilder(listenable: pw, builder: (_, __) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [_Field(label: 'Password', controller: pw, password: true, hints: const [AutofillHints.newPassword]), _Strength(pw.text)])),
+      Reveal(delay: 200, child: ListenableBuilder(listenable: pw, builder: (_, __) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [_Field(label: 'Password', controller: pw, password: true, hints: const [AutofillHints.newPassword]), _Strength(pw.text)]))),
       const Gap(14),
-      _Field(label: 'Confirm password', controller: pw2, password: true, hints: const [AutofillHints.newPassword], action: TextInputAction.done, onSubmit: _go),
+      Reveal(delay: 250, child: ListenableBuilder(listenable: Listenable.merge([pw, pw2]), builder: (_, __) {
+        final match = pw2.text.isNotEmpty && pw.text == pw2.text;
+        final differs = pw2.text.isNotEmpty && pw.text != pw2.text;
+        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _Field(label: 'Confirm password', controller: pw2, password: true, hints: const [AutofillHints.newPassword], action: TextInputAction.done, onSubmit: _go),
+          AnimatedSize(duration: const Duration(milliseconds: 180), child: pw2.text.isEmpty ? const SizedBox(width: double.infinity) : Padding(padding: const EdgeInsets.only(top: 8), child: Row(children: [
+            Icon(match ? PhosphorIconsFill.checkCircle : PhosphorIconsFill.warningCircle, size: 14, color: match ? c.ok : c.danger),
+            const SizedBox(width: 6),
+            Text(match ? 'The passwords match' : (differs ? 'The passwords do not match yet' : ''), style: TypeX.ui(12, w: FontWeight.w600, color: match ? c.ok : c.danger)),
+          ]))),
+        ]);
+      })),
       const Gap(24),
-      DkButton(s.authBusy ? 'Creating…' : 'Create workspace', icon: PhosphorIconsBold.arrowRight, kind: BtnKind.primary, expand: true, onPressed: s.authBusy ? null : _go),
-      const Gap(20),
-      Text('This screen only appears once. After the first owner exists, nobody can create another account without signing in.', style: TypeX.ui(12.5, color: c.text3, h: 1.5)),
+      Reveal(delay: 300, child: DkButton(s.authBusy ? 'Creating…' : (s.hostedServer ? 'Create super admin' : 'Create workspace'), icon: PhosphorIconsBold.arrowRight, kind: BtnKind.primary, expand: true, onPressed: s.authBusy ? null : _go)),
+      const Gap(22),
+      Reveal(delay: 350, child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: c.surface2, borderRadius: BorderRadius.circular(14), border: Border.all(color: c.line)),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(PhosphorIconsRegular.sealCheck, size: 17, color: c.text3),
+          const SizedBox(width: 10),
+          Expanded(child: Text('This screen appears only once. After the first owner exists, nobody can create another account without signing in.', style: TypeX.ui(12.5, color: c.text3, h: 1.5))),
+        ]),
+      )),
     ]);
   }
 }
@@ -335,6 +317,36 @@ class _ChangeFormState extends State<_ChangeForm> {
       DkButton(s.authBusy ? 'Saving…' : 'Save and continue', icon: PhosphorIconsBold.arrowRight, kind: BtnKind.primary, expand: true, onPressed: s.authBusy ? null : _go),
       const Gap(8),
       DkButton('Sign out', kind: BtnKind.ghost, expand: true, onPressed: s.signOut),
+    ]);
+  }
+}
+
+
+/// A platform administrator who belongs to no business yet (or has left them all): pick one to work in, or make a new one.
+class _PickBusiness extends StatefulWidget {
+  const _PickBusiness();
+  @override
+  State<_PickBusiness> createState() => _PickBusinessState();
+}
+
+class _PickBusinessState extends State<_PickBusiness> {
+  String? error;
+  bool busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = context.watch<AppState>();
+    final c = context.c;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('Choose a business', style: TypeX.display(30, color: c.text)),
+      const Gap(6),
+      Text(s.businesses.isEmpty ? 'You are not part of any business yet. Ask the owner of your business to add you, or contact the Dakbox administrator.' : 'You work in more than one business. Pick the one to open. You can switch at any time from the account menu.', style: TypeX.ui(14, color: c.text3, h: 1.5)),
+      const Gap(20),
+      for (final b in s.businesses)
+        Padding(padding: const EdgeInsets.only(bottom: 8), child: DkButton('${b['name']}  ·  ${b['role']}', kind: BtnKind.soft, expand: true, onPressed: busy ? null : () async { setState(() => busy = true); final e = await s.switchBusiness(b['id'] as String); if (mounted) setState(() { busy = false; error = e; }); })),
+      if (error != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(error!, style: TypeX.ui(13, color: c.danger))),
+      const Gap(20),
+      DkButton('Sign out', kind: BtnKind.ghost, onPressed: s.signOut),
     ]);
   }
 }

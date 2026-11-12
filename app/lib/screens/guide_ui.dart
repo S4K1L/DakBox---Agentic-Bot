@@ -72,7 +72,7 @@ const metaGuide = [
 ];
 
 const webChatGuide = [
-  'Web chat needs no account. Your website visitors chat through the widget page at /widget on this server.',
+  'Web chat needs no account. Your website visitors chat through this business’s widget page (shown under Assistant, Try it, Embed on your site).',
   'To put it on your site, link or embed that page (for example in an iframe) from your website.',
   'Everything else works the same: the assistant answers, and staff see the chat in the Inbox.',
 ];
@@ -100,7 +100,7 @@ const groupGuides = <String, List<String>>{
   ],
   'Store': [
     'Dakbox keeps its own catalog, stock and orders, so you do not need a store platform to use it. Orders come from chats, the website chat and your team.',
-    'WooCommerce and Shopify sync is not built yet: the switches here are demo only and never store any keys.',
+    'To bring in products from your website (Shopify, WooCommerce or any shop website), connect it below. Dakbox shows what it found before saving anything.',
   ],
 };
 

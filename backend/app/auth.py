@@ -5,6 +5,8 @@
   and a session can be revoked (sign out, password change, deactivation).
 - Roles: owner and admin can do everything (admins cannot touch owners); agent works the inbox and orders but
   cannot approve money or change settings; viewer is read-only.
+- People are global accounts (registry.py) with a membership, and a role, in each business. A session names the business it works in; that, and only that,
+  decides which business's data a request sees.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, Request
 
-from . import db
+from . import db, ratelimit, registry
 from .util import hue_for, initials
 
 SESSION_DAYS = 7
@@ -90,6 +92,7 @@ _DUMMY = _hash_sync("dakbox-timing-equaliser")
 # ---------------------------------------------------------------- login throttling
 _fails: dict[str, list[float]] = {}
 _MAX_FAILS, _WINDOW = 5, 15 * 60
+_IP_MAX_FAILS = 30                     # failures from one address across ALL emails in the window: slows guessing that rotates accounts
 
 
 def _key(request: Request, email: str) -> str:
@@ -102,66 +105,64 @@ def check_throttle(request: Request, email: str) -> None:
     now = time.time()
     recent = [t for t in _fails.get(k, []) if now - t < _WINDOW]
     _fails[k] = recent
+    ipk = _ip_key(request)
+    ip_recent = [t for t in _fails.get(ipk, []) if now - t < _WINDOW]
+    _fails[ipk] = ip_recent
+    if len(ip_recent) >= _IP_MAX_FAILS:
+        raise HTTPException(429, "Too many attempts from this address. Try again in 15 min.")
     if len(recent) >= _MAX_FAILS:
         wait = int(_WINDOW - (now - recent[0])) // 60 + 1
         raise HTTPException(429, f"Too many attempts. Try again in {wait} min.")
 
 
+def _ip_key(request: Request) -> str:
+    return "ip|" + (request.client.host if request.client else "?")
+
+
 def record_fail(request: Request, email: str) -> None:
     _fails.setdefault(_key(request, email), []).append(time.time())
+    _fails.setdefault(_ip_key(request), []).append(time.time())
 
 
 def clear_fails(request: Request, email: str) -> None:
-    _fails.pop(_key(request, email), None)
+    _fails.pop(_key(request, email), None)             # (the address-wide count is left to age out: one good login does not erase a guessing run)
 
 
 # ---------------------------------------------------------------- users & sessions
-def view(u) -> dict:
-    return {
-        "id": u["id"], "name": u["name"], "first": u["name"].split()[0], "email": u["email"], "initials": initials(u["name"]), "hue": u["hue"],
-        "role": u["role"], "active": bool(u["active"]), "mustChange": bool(u["must_change"]), "lastLoginAt": u["last_login_at"], "createdAt": u["created_at"],
-        "permissions": sorted(ROLE_PERMS[u["role"]]),
+def view(acct, role: str, business: dict | None = None, businesses: list[dict] | None = None, active: bool = True) -> dict:
+    """An account as seen inside one business (its role and permissions there)."""
+    u = {
+        "id": acct["id"], "name": acct["name"], "first": acct["name"].split()[0], "email": acct["email"], "initials": initials(acct["name"]), "hue": acct["hue"],
+        "role": role, "active": bool(active) and bool(acct["active"]), "mustChange": bool(acct["must_change"]), "lastLoginAt": acct["last_login_at"], "createdAt": acct["created_at"],
+        "permissions": sorted(ROLE_PERMS.get(role, set())), "platformAdmin": bool(acct["platform_admin"]),
     }
+    u["business"] = business
+    u["businesses"] = businesses if businesses is not None else []
+    return u
+
+
+def business_view(b) -> dict:
+    return {"id": b["id"], "slug": b["slug"], "name": b["name"], "plan": b["plan"], "status": b["status"]}
+
+
+def my_businesses(account_id: str) -> list[dict]:
+    return [{**business_view(m), "role": m["role"]} for m in registry.memberships_of(account_id)]
 
 
 def user_count() -> int:
-    return db.get("SELECT COUNT(*) n FROM users")["n"]
+    return registry.account_count()
 
 
-def create_user(name: str, email: str, role: str, pw_hash: str, must_change: bool) -> dict:
-    uid = db.uid("usr")
-    db.run(
-        "INSERT INTO users(id,email,name,role,password_hash,must_change,active,hue,created_at) VALUES(?,?,?,?,?,?,1,?,?)",
-        [uid, email.strip().lower(), name.strip(), role, pw_hash, 1 if must_change else 0, hue_for(name), db.now()],
-    )
-    return db.get("SELECT * FROM users WHERE id=?", [uid])
-
-
-def _digest(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
-def open_session(user_id: str, request: Request | None) -> str:
-    token = secrets.token_urlsafe(32)
-    exp = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    db.run(
-        "INSERT INTO sessions(token_hash,user_id,created_at,expires_at,last_seen_at,ip,agent) VALUES(?,?,?,?,?,?,?)",
-        [_digest(token), user_id, db.now(), exp, db.now(), request.client.host if request and request.client else None, (request.headers.get("user-agent", "")[:160] if request else None)],
-    )
-    db.run("UPDATE users SET last_login_at=? WHERE id=?", [db.now(), user_id])
-    db.run("DELETE FROM sessions WHERE expires_at < ?", [db.now()])  # housekeeping
-    return token
+def open_session(account_id: str, business_id: str | None, request: Request | None) -> str:
+    return registry.open_session(account_id, business_id, request.client.host if request and request.client else None, request.headers.get("user-agent", "") if request else None)
 
 
 def revoke_session(token: str) -> None:
-    db.run("DELETE FROM sessions WHERE token_hash=?", [_digest(token)])
+    registry.revoke_session(token)
 
 
-def revoke_user_sessions(user_id: str, except_token: str | None = None) -> None:
-    if except_token:
-        db.run("DELETE FROM sessions WHERE user_id=? AND token_hash != ?", [user_id, _digest(except_token)])
-    else:
-        db.run("DELETE FROM sessions WHERE user_id=?", [user_id])
+def revoke_user_sessions(account_id: str, except_token: str | None = None, business_id: str | None = None) -> None:
+    registry.revoke_account(account_id, except_token=except_token, business_id=business_id)
 
 
 def token_from(request: Request) -> str | None:
@@ -172,20 +173,58 @@ def token_from(request: Request) -> str | None:
 
 
 _PASSWORD_OK_PATHS = {"/api/me", "/api/auth/password", "/api/auth/logout"}
+_NO_BUSINESS_OK = ("/api/auth/", "/api/platform/")          # prefixes; /api/me is matched exactly (a prefix would also match /api/meta)
 
 
-async def current_user(request: Request) -> dict:
+def _no_business_ok(path: str) -> bool:
+    return path == "/api/me" or path.startswith(_NO_BUSINESS_OK)
+
+
+def _session_account(request: Request):
     token = token_from(request)
     if not token:
         raise HTTPException(401, "Sign in to continue.")
-    row = db.get(
-        "SELECT u.*, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash=?", [_digest(token)]
-    )
-    if not row or row["expires_at"] < db.now() or not row["active"]:
+    s = registry.session(token)
+    if not s or s["expires_at"] < db.now() or not s["account_active"]:
         raise HTTPException(401, "Your session has ended. Sign in again.")
-    if row["must_change"] and request.url.path not in _PASSWORD_OK_PATHS:
+    return token, s, registry.account_by_id(s["account_id"])
+
+
+async def current_user(request: Request) -> dict:
+    """Who is asking, and which business they are working in. The business comes from the session alone; a header or parameter naming another one is ignored."""
+    token, s, acct = _session_account(request)
+    if acct["must_change"] and request.url.path not in _PASSWORD_OK_PATHS:
         raise HTTPException(403, "password_change_required")
-    u = view(row)
+    bid = s["business_id"]
+    if not bid:                                  # a platform admin who has not entered a business yet
+        if not _no_business_ok(request.url.path):
+            raise HTTPException(403, "business_required")
+        u = view(acct, "viewer", None, my_businesses(acct["id"]))
+        u["permissions"] = []
+        u["_token"] = token
+        _current.set(u)
+        return u
+    m = registry.membership(acct["id"], bid)
+    biz = registry.resolve(bid) if m else None
+    if not m or not m["active"] or not biz:
+        raise HTTPException(401, "Your access to this business has ended. Sign in again.")
+    if biz["status"] == "suspended" and not _no_business_ok(request.url.path):
+        raise HTTPException(403, "This business is suspended. Contact the Dakbox administrator.")
+    db.set_business(bid)
+    if not request.url.path.startswith(("/api/auth/", "/api/me", "/api/events")):
+        ratelimit.check("api", bid)
+    u = view(acct, m["role"], business_view(biz), my_businesses(acct["id"]))
+    u["_token"] = token
+    _current.set(u)
+    return u
+
+
+async def platform_admin(request: Request) -> dict:
+    """For the platform's own screens: a signed-in platform administrator. Does not select any business."""
+    token, s, acct = _session_account(request)
+    if not acct["platform_admin"]:
+        raise HTTPException(403, "Only the platform administrator can do this.")
+    u = view(acct, "viewer", None, my_businesses(acct["id"]))
     u["_token"] = token
     _current.set(u)
     return u

@@ -2,11 +2,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api.dart';
+import 'download.dart';
 
-enum Section { inbox, approvals, orders, products, customers, insights, connections, assistant, team }
+enum Section { inbox, approvals, orders, products, customers, insights, connections, assistant, team, setup, business }
 
 /// Where the app is in the sign-in flow.
-enum Phase { loading, setup, login, mustChange, ready }
+enum Phase { loading, setup, login, mustChange, pickBusiness, ready }
 
 extension SectionX on Section {
   String get label => switch (this) {
@@ -19,6 +20,8 @@ extension SectionX on Section {
         Section.connections => 'Connections',
         Section.assistant => 'Assistant',
         Section.team => 'Team',
+        Section.setup => 'Get started',
+        Section.business => 'My business',
       };
 }
 
@@ -123,6 +126,7 @@ class AppState extends ChangeNotifier {
     try {
       final st = await api.getPublic('/api/auth/status');
       offline = false;
+      hostedServer = st['hosted'] == true;
       phase = st['setupRequired'] == true ? Phase.setup : Phase.login;
     } on ApiError {
       offline = true;
@@ -131,7 +135,15 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void _enter(J me) {
+  bool hostedServer = false;                      // a server that hosts other people's businesses: its first account is the super administrator only
+
+  /// Which panel the app shows: the business panel (a business's owner and staff) or the super admin panel (platform administrators).
+  String panel = 'business';
+  bool get inAdmin => isPlatformAdmin && panel == 'admin';
+
+  void openAdminPanel() { panel = 'admin'; _timer?.cancel(); notifyListeners(); loadPlatform(); }
+
+  void _enter(J me, {String? panel}) {
     user = me;
     this.me = me;
     authError = null;
@@ -141,9 +153,25 @@ class AppState extends ChangeNotifier {
       _timer?.cancel();
       return;
     }
+    final admin = me['platformAdmin'] == true;
+    this.panel = admin ? (panel ?? 'admin') : 'business';     // a platform administrator lands in the super admin panel; everyone else in their business
+    if (this.panel == 'admin') {
+      phase = Phase.ready;
+      _timer?.cancel();
+      loadPlatform();
+      _notify();
+      return;
+    }
+    if (me['business'] == null) {          // someone with no business to work in yet: choose one
+      phase = Phase.pickBusiness;
+      _timer?.cancel();
+      _notify();
+      return;
+    }
     phase = Phase.ready;
-    if (!can('team.manage') && section == Section.team) section = Section.inbox;
+    if (!can('team.manage') && (section == Section.team || section == Section.business)) section = Section.inbox;
     refreshCore();
+    loadOnboarding(entering: true);
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(milliseconds: 2200), (_) => _tick());
   }
@@ -201,11 +229,134 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  // ---------------------------------------------------------------- businesses
+  List<J> get businesses => ((me['businesses'] as List?) ?? const []).cast<J>();
+  bool get isPlatformAdmin => me['platformAdmin'] == true;
+  String? get businessId => (me['business'] as Map?)?['id'] as String?;
+
+  /// Work in another business you belong to. Everything on screen belongs to the previous one, so it is dropped before the new one loads.
+  Future<String?> switchBusiness(String ref) async {
+    try {
+      await api.post('/api/auth/switch', {'business': ref});
+      _clearData();
+      phase = Phase.loading;
+      notifyListeners();
+      _enter(await api.get('/api/me'), panel: 'business');
+      notifyListeners();
+      return null;
+    } on ApiError catch (e) {
+      if (phase == Phase.loading) { phase = Phase.ready; notifyListeners(); }
+      return e.message;
+    }
+  }
+
+  // ---------------------------------------------------------------- setup guide (a new business)
+  J? onboarding;
+  String? assistantTab;                          // set by the guide so the Assistant screen opens on the tab it points to
+
+  bool get showSetup => onboarding?['show'] == true && can('settings.write');
+
+  Future<void> loadOnboarding({bool entering = false}) async {
+    try {
+      onboarding = await api.get('/api/onboarding');
+      if (entering && showSetup) section = Section.setup;
+      _notify();
+    } on ApiError catch (_) {}
+  }
+
+  Future<J> skipStep(String step) => _try(() async { onboarding = await api.post('/api/onboarding/skip', {'step': step}); _notify(); return onboarding!; });
+  Future<J> dismissSetup() => _try(() async {
+        onboarding = await api.post('/api/onboarding/dismiss');
+        if (section == Section.setup) section = Section.inbox;
+        _notify();
+        return onboarding!;
+      });
+
+  void openAssistantTab(String tab) { assistantTab = tab; setSection(Section.assistant); }
+
+  // ---------------------------------------------------------------- the business owner's panel
+  J? business;                                   // this business as its owner sees it: details, plan and use
+
+  Future<void> loadBusiness() async {
+    try { business = await api.get('/api/business'); _notify(); } on ApiError catch (_) {}
+  }
+
+  Future<J> renameBusiness(String name) => _try(() async {
+        business = await api.patch('/api/business', {'name': name});
+        final m = await api.get('/api/me');
+        me = m; user = m;
+        _notify();
+        return business!;
+      });
+
+  /// Ask for a copy of the business's data and hand it to the browser. Returns an error message, or null.
+  Future<String?> exportMyData() async {
+    final r = await _try(() => api.post('/api/business/export'));
+    if (r['error'] != null) return r['error'] as String;
+    return openDownload('${api.base}${r['url']}') ? null : 'Your browser could not start the download.';
+  }
+
+  // ---------------------------------------------------------------- platform administration
+  J? pOverview;
+  List<J> pBusinesses = [], pUsage = [], pPlans = [], pAccounts = [], pLog = [], pFeatures = [];
+
+  Future<void> loadPlatform() async {
+    if (!isPlatformAdmin) return;
+    try {
+      pOverview = await api.get('/api/platform/overview');
+      pBusinesses = ((await api.get('/api/platform/businesses'))['items'] as List).cast<J>();
+      final u = await api.get('/api/platform/usage');
+      pUsage = (u['items'] as List).cast<J>();
+      pPlans = ((await api.get('/api/platform/plans'))['items'] as List).cast<J>();
+      pAccounts = ((await api.get('/api/platform/accounts'))['items'] as List).cast<J>();
+      pLog = ((await api.get('/api/platform/log', q: {'limit': 60}))['items'] as List).cast<J>();
+      pFeatures = ((await api.get('/api/platform/features'))['items'] as List).cast<J>();
+      _notify();
+    } on ApiError catch (_) {}
+  }
+
+  Future<J> _platformDo(Future<J> Function() f) => _try(() async { final r = await f(); await loadPlatform(); return r; });
+
+  Future<J> patchBusiness(String slug, J body) => _platformDo(() => api.patch('/api/platform/businesses/$slug', body));
+  Future<J> deleteBusiness(String slug, String confirm) => _platformDo(() => api.post('/api/platform/businesses/$slug/delete', {'confirm': confirm}));
+  Future<J> joinBusiness(String slug) => _platformDo(() => api.post('/api/platform/businesses/$slug/join'));
+  Future<J> leaveBusiness(String slug) => _platformDo(() => api.post('/api/platform/businesses/$slug/leave'));
+  Future<J> businessDetail(String slug) => _try(() => api.get('/api/platform/businesses/$slug'));
+  Future<J> accountDetail(String id) => _try(() => api.get('/api/platform/accounts/$id'));
+  Future<J> createAccount(J body) => _platformDo(() => api.post('/api/platform/accounts', body));
+  Future<J> resetAccountPassword(String id, String pw) => _try(() => api.post('/api/platform/accounts/$id/reset-password', {'password': pw}));
+  Future<J> setMembership(String id, String slug, J body) => _platformDo(() => api.put('/api/platform/accounts/$id/memberships/$slug', body));
+  Future<J> removeMembership(String id, String slug) => _platformDo(() => api.delete('/api/platform/accounts/$id/memberships/$slug'));
+  Future<J> deleteAccount(String id) => _platformDo(() => api.post('/api/platform/accounts/$id/delete'));
+  Future<J> platformHealth() => _try(() => api.get('/api/platform/health'));
+  Future<J> platformBackups() => _try(() => api.get('/api/platform/backups'));
+  Future<J> backupNow() => _try(() => api.post('/api/platform/backups'));
+  Future<J> drillBackup(String name) => _try(() => api.post('/api/platform/backups/$name/drill'));
+  Future<J> eraseCustomer(String id) => _try(() => api.post('/api/customers/$id/erase'));
+  Future<J> savePlan(String id, J body) => _platformDo(() => api.put('/api/platform/plans/$id', body));
+  Future<J> platformAi() => _try(() => api.get('/api/platform/ai'));
+  Future<J> savePlatformAi(String provider, String key, {String? model, String? smallModel}) => _try(() => api.put('/api/platform/ai', {'provider': provider, 'key': key, 'model': model, 'smallModel': smallModel}));
+  Future<J> removePlatformAi(String provider) => _try(() => api.delete('/api/platform/ai?provider=$provider'));
+  Future<J> patchAccount(String id, J body) => _platformDo(() => api.patch('/api/platform/accounts/$id', body));
+
+  /// Build the export and hand it to the browser. Returns an error message, or null.
+  Future<String?> exportBusiness(String slug) async {
+    final r = await _try(() => api.post('/api/platform/businesses/$slug/export'));
+    if (r['error'] != null) return r['error'] as String;
+    final url = '${api.base}${r['url']}';
+    return openDownload(url) ? null : 'Your browser could not start the download.';
+  }
+
+  /// Create a business with its own owner (a new person with a temporary password, or an existing account by email).
+  Future<J> createBusiness(String name, String? slug, {String? plan, String? ownerName, String? ownerEmail, String? ownerPassword}) =>
+      _platformDo(() => api.post('/api/platform/businesses', {'name': name, if (slug != null && slug.isNotEmpty) 'slug': slug, if (plan != null) 'plan': plan, if (ownerEmail != null) 'owner': {'name': ownerName ?? '', 'email': ownerEmail, 'password': ownerPassword ?? ''}}));
+
   void _clearData() {
     _timer?.cancel();
     me = {}; user = {};
     convs = []; convId = null; conv = null; approvals = []; orders = []; products = []; customers = [];
     insights = null; channels = []; integrations = []; settings = null; team = []; audit = [];
+    onboarding = null; assistantTab = null; pOverview = null; pBusinesses = []; pUsage = []; pPlans = []; pAccounts = []; pLog = []; pFeatures = []; business = null; panel = 'business';
     pendingApprovals = 0; draftsWaiting = 0; section = Section.inbox; showMobileThread = false;
   }
 
@@ -232,6 +383,7 @@ class AppState extends ChangeNotifier {
   List<J> roleGuide = [];
   bool canGrantOwner = false;
   List<J> audit = [];
+  J? seats;                                      // {used, limit, left} for this business's plan
 
   Future<void> loadTeam() async {
     if (!can('team.manage')) return;
@@ -240,6 +392,7 @@ class AppState extends ChangeNotifier {
       team = (r['items'] as List).cast<J>();
       roleGuide = (r['roles'] as List).cast<J>();
       canGrantOwner = r['canGrantOwner'] == true;
+      seats = r['seats'] as J?;
       final a = await api.get('/api/audit', q: {'limit': 40});
       audit = (a['items'] as List).cast<J>();
       _notify();
@@ -249,9 +402,9 @@ class AppState extends ChangeNotifier {
   /// Returns an error message, or null on success.
   Future<String?> invite(String name, String email, String role, String password) async {
     try {
-      await api.post('/api/team', {'name': name, 'email': email, 'role': role, 'password': password});
+      final r = await api.post('/api/team', {'name': name, 'email': email, 'role': role, 'password': password});
       await loadTeam();
-      toast('$name was added. They choose their own password at first sign-in');
+      toast('$name was added. They choose their own password at first sign-in. ${r['note'] ?? ''}'.trim());
       return null;
     } on ApiError catch (e) { return e.message; }
   }
@@ -350,6 +503,10 @@ class AppState extends ChangeNotifier {
         await loadSettings();
       case Section.team:
         await loadTeam();
+      case Section.business:
+        await loadBusiness();
+      case Section.setup:
+        await loadOnboarding();
       case Section.inbox:
         break;
     }
@@ -535,6 +692,14 @@ class AppState extends ChangeNotifier {
     } on ApiError catch (_) {}
   }
 
+  Future<J> quoteOrder(List<J> lines, String zone, int? shipping) => _try(() => api.post('/api/orders/quote', {'lines': lines, 'zone': zone, 'shipping': shipping}));
+
+  Future<J> createOrder(J body) => _try(() async {
+        final r = await api.post('/api/orders', body);
+        await Future.wait([loadOrders(), loadProducts(), loadCustomers(), refreshCore()]);
+        return r;
+      });
+
   void setOrderTab(String t) { orderTab = t; notifyListeners(); }
   void setOrderQuery(String q) { orderQuery = q; notifyListeners(); }
   void selectOrder(String? no) { orderNo = no; notifyListeners(); }
@@ -548,7 +713,7 @@ class AppState extends ChangeNotifier {
           case 'done': if (o['fulfillment'] != 'Delivered') return false;
           case 'issue': if (!issue) return false;
         }
-        if (orderQuery.isNotEmpty && !('${o['number']} ${o['customer']['name']}'.toLowerCase().contains(orderQuery.toLowerCase()))) return false;
+        if (orderQuery.isNotEmpty && !('${o['number']} ${o['customer']['name']} ${o['site']?['number'] ?? ''}'.toLowerCase().contains(orderQuery.toLowerCase()))) return false;
         return true;
       }).toList();
 
@@ -603,6 +768,47 @@ class AppState extends ChangeNotifier {
   Future<J> checkRefund(String id) => _try(() async {
         final r = await api.post('/api/refunds/$id/check');
         await loadOrders();
+        return r;
+      });
+
+  // ---------------------------------------------------------------- websites that products are imported from
+  List<J> catalogSources = [];
+
+  Future<void> loadCatalogSources() async {
+    try {
+      final r = await api.get('/api/catalog/sources');
+      catalogSources = (r['items'] as List).cast<J>();
+      _notify();
+    } on ApiError catch (_) {}
+  }
+
+  Future<J> discoverSite(String url) => _try(() => api.post('/api/catalog/discover', {'url': url}));
+
+  Future<J> importSite(String url, int defaultStock, bool confirmCurrency) => _try(() async {
+        final r = await api.post('/api/catalog/import', {'url': url, 'defaultStock': defaultStock, 'confirmCurrency': confirmCurrency});
+        await Future.wait([loadProducts(), loadCatalogSources()]);
+        return r;
+      });
+
+  Future<J> syncSite(String id) => _try(() async {
+        final r = await api.post('/api/catalog/sources/$id/sync', {});
+        await Future.wait([loadProducts(), loadCatalogSources()]);
+        return r;
+      });
+
+  Future<J> ordersSetup(String id) => _try(() => api.get('/api/catalog/sources/$id/orders'));
+
+  Future<J> saveOrdersSetup(String id, J body) => _try(() async {
+        final r = await api.put('/api/catalog/sources/$id/orders', body);
+        await loadCatalogSources();
+        return r;
+      });
+
+  Future<J> newOrdersSecret(String id) => _try(() => api.post('/api/catalog/sources/$id/orders/secret', {}));
+
+  Future<J> disconnectSite(String id) => _try(() async {
+        final r = await api.delete('/api/catalog/sources/$id');
+        await loadCatalogSources();
         return r;
       });
 
@@ -726,6 +932,7 @@ class AppState extends ChangeNotifier {
       channelsMeta = c;
       if (can('connections.write') || metaApp.isEmpty) { loadMeta(); }
       loadProviders();
+      loadCatalogSources();
       final i = await api.get('/api/integrations');
       integrations = (i['items'] as List).cast<J>();
       notifications = (i['notifications'] as List).cast<J>();
@@ -809,6 +1016,37 @@ class AppState extends ChangeNotifier {
   Future<void> saveNotifications() async {
     await guard(() => api.put('/api/notifications', {'rows': notifications}));
   }
+
+  // ---------------------------------------------------------------- the AI provider and its key (owner panel)
+  void _engineChanged(J r) {
+    if (r['engine'] != null) { me = {...me, 'engine': r['engine'], 'engineLabel': r['engineLabel'], 'model': r['engine'] != 'offline' ? r['model'] : null}; }
+    if (settings != null) { settings = {...settings!, 'engine': r['engine'], 'engineLabel': r['engineLabel'], 'model': r['model'], 'keySource': r['source']}; }
+    _notify();
+  }
+
+  Future<J> planInfo() => _try(() => api.get('/api/plan'));
+
+  Future<J> aiKeyInfo() => _try(() => api.get('/api/assistant/key'));
+
+  Future<J> saveAiKey(String provider, String key, {String? model, String? smallModel, String? baseUrl, bool skipCheck = false}) => _try(() async {
+        final r = await api.put('/api/assistant/key', {'provider': provider, 'key': key, 'model': model, 'smallModel': smallModel, 'baseUrl': baseUrl, 'skipCheck': skipCheck});
+        _engineChanged(r);
+        return r;
+      });
+
+  Future<J> setAiProvider(String provider, {String? model, String? smallModel, String? baseUrl}) => _try(() async {
+        final r = await api.put('/api/assistant/provider', {'provider': provider, 'model': model, 'smallModel': smallModel, 'baseUrl': baseUrl});
+        _engineChanged(r);
+        return r;
+      });
+
+  Future<J> checkAiKey(String provider) => _try(() => api.post('/api/assistant/key/check?provider=$provider', {}));
+
+  Future<J> removeAiKey(String provider) => _try(() async {
+        final r = await api.delete('/api/assistant/key?provider=$provider');
+        _engineChanged(r);
+        return r;
+      });
 
   Future<void> loadSettings() async {
     try { settings = await api.get('/api/settings'); _notify(); } on ApiError catch (_) {}

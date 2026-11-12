@@ -7,6 +7,7 @@ import '../core/format.dart';
 import '../core/state.dart';
 import '../widgets/kit.dart';
 import '../widgets/page.dart';
+import 'new_order.dart';
 import 'order_actions.dart';
 
 String payTone(String s) => s == 'Paid' ? 'ok' : (s == 'Pending' ? 'warn' : (s == 'Failed' ? 'danger' : ''));
@@ -30,7 +31,7 @@ class OrdersScreen extends StatelessWidget {
           PageHeader(
             title: 'Orders',
             subtitle: Row(mainAxisSize: MainAxisSize.min, children: [Text('${plural(s.toShip, 'order')} to ship today', style: TypeX.ui(13.5, color: c.text3)), const SizedBox(width: 8), const Tag('Sample data', tone: 'warn', small: true)]),
-            actions: [SearchBox(hint: 'Search orders', width: 220, onChanged: s.setOrderQuery), DkButton('Sync', icon: PhosphorIconsRegular.arrowsClockwise, onPressed: () => s.loadOrders().then((_) => s.toast('Orders are up to date')))],
+            actions: [SearchBox(hint: 'Search orders', width: 170, onChanged: s.setOrderQuery), if (s.can('orders.manage')) DkButton('New order', icon: PhosphorIconsBold.plus, kind: BtnKind.primary, onPressed: () => showNewOrder(context)), DkIconButton(PhosphorIconsRegular.arrowsClockwise, tooltip: 'Refresh orders', onPressed: () => s.loadOrders().then((_) => s.toast('Orders are up to date')))],
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 14),
@@ -96,9 +97,10 @@ class _OrderRow extends StatelessWidget {
                   Row(children: [
                     Flexible(child: Text(cust['name'] as String, style: TypeX.ui(14.5, w: FontWeight.w800, color: c.text), maxLines: 1, overflow: TextOverflow.ellipsis)),
                     if (o['source'] == 'chat') Padding(padding: const EdgeInsets.only(left: 6), child: Icon(PhosphorIconsFill.sparkle, size: 12, color: c.primary)),
+                    if (o['site'] != null) Padding(padding: const EdgeInsets.only(left: 6), child: Icon(PhosphorIconsFill.globeHemisphereEast, size: 12, color: c.primary)),
                   ]),
                   const SizedBox(height: 2),
-                  Text('${o['number']} · ${dateTime(o['createdAt'] as String?)}', style: TypeX.mono(11.5, color: c.text3), maxLines: 1, overflow: TextOverflow.ellipsis),
+                  Text('${o['number']}${o['site'] != null && (o['site'] as Map)['number'] != null ? ' (site ${(o['site'] as Map)['number']})' : ''} · ${dateTime(o['createdAt'] as String?)}', style: TypeX.mono(11.5, color: c.text3), maxLines: 1, overflow: TextOverflow.ellipsis),
                   if (first.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 3), child: Text(first, style: TypeX.ui(12.5, color: c.text2), maxLines: 1, overflow: TextOverflow.ellipsis)),
                   const SizedBox(height: 7),
                   Wrap(spacing: 6, runSpacing: 4, children: [Tag(pay, tone: payTone(pay), dot: true, small: true), Tag(ful, tone: fulTone(ful), dot: true, small: true), if (o['returnRequested'] == true) const Tag('Return', tone: 'danger', small: true)]),
@@ -159,7 +161,7 @@ class _OrderDetailState extends State<_OrderDetail> {
             const Gap(8),
             Row(children: [ChannelIcon(kind: (o['channel'] ?? 'web') as String, size: 16), const SizedBox(width: 8), Text('${cust['name']} · ${dateTime(o['createdAt'] as String?)}', style: TypeX.ui(12.5, color: c.text3))]),
             const Gap(10),
-            Wrap(spacing: 6, children: [Tag(pay['status'] as String, tone: payTone(pay['status'] as String), dot: true), Tag(o['fulfillment'] as String, tone: fulTone(o['fulfillment'] as String), dot: true), if (o['source'] == 'chat') Tag('Placed in chat', tone: 'ai', icon: PhosphorIconsFill.sparkle)]),
+            Wrap(spacing: 6, children: [Tag(pay['status'] as String, tone: payTone(pay['status'] as String), dot: true), Tag(o['fulfillment'] as String, tone: fulTone(o['fulfillment'] as String), dot: true), if (o['source'] == 'chat') Tag('Placed in chat', tone: 'ai', icon: PhosphorIconsFill.sparkle), if (o['source'] == 'staff') Tag('Created by staff', tone: 'accent', icon: PhosphorIconsFill.userCircle), if (o['site'] != null) Tag('From ${(o['site'] as Map)['host']}${(o['site'] as Map)['number'] != null ? ' · ${(o['site'] as Map)['number']}' : ''}', tone: 'accent', icon: PhosphorIconsFill.globeHemisphereEast)]),
           ]),
         ),
         Expanded(
@@ -189,13 +191,14 @@ class _OrderDetailState extends State<_OrderDetail> {
                   padding: const EdgeInsets.symmetric(vertical: 6),
                   child: Row(children: [
                     ProductArt(kind: _artFor(it['sku'] as String), size: 46, radius: 11), const SizedBox(width: 12),
-                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(it['name'] as String, style: TypeX.ui(14, w: FontWeight.w700, color: c.text)), Text('${it['variant']} · Qty ${it['qty']}', style: TypeX.ui(12, color: c.text3))])),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(it['name'] as String, style: TypeX.ui(14, w: FontWeight.w700, color: c.text)), Text('${it['variant'] != null ? '${it['variant']} · ' : ''}Qty ${it['qty']}', style: TypeX.ui(12, color: c.text3))])),
                     Text(taka((it['price'] as num) * (it['qty'] as num)), style: TypeX.mono(13, color: c.text)),
                   ]),
                 ),
               const Gap(6), const Rule(), const Gap(8),
               _Sum('Subtotal', taka(o['subtotal'] as num)),
               _Sum('Shipping', (o['shipping'] as num) > 0 ? taka(o['shipping'] as num) : 'Free'),
+              if ((o['adjustment'] as num) != 0) _Sum((o['adjustment'] as num) < 0 ? 'Discount' : 'Tax and other charges', '${(o['adjustment'] as num) < 0 ? '−' : ''}${taka((o['adjustment'] as num).abs())}'),
               _Sum('Total', taka(o['total'] as num), bold: true),
             ])),
             Padding(padding: const EdgeInsets.only(bottom: 12), child: ShippingBox(o: o)),

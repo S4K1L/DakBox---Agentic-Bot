@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .. import auth, checkout, couriers, db, domain, events, metacfg, payments, sms, store
-from ..agent.agent import MODEL, has_model
+from .. import aikey, auth, checkout, limits, couriers, db, domain, events, metacfg, payments, sms, store
+from ..agent.agent import has_model
 from ..agent.tools import DEFAULT_SETTINGS, agent_settings
 from ..events import emit
 from ..util import initials, lang_name, rates_for, taka
@@ -62,6 +62,7 @@ def order_view(o) -> dict:
         "returnRequested": bool(o["return_requested"]), "conversationId": conv["id"] if conv else None,
         "payments": payments.for_order(o["number"]), "cod": couriers.cod_amount(o),
         "source": o["source"], "ship": {"name": o["ship_name"] or cust["name"], "phone": o["ship_phone"] or cust["phone"]},
+        "site": {"host": o["ext_source"], "number": o["ext_number"]} if o["ext_source"] else None, "adjustment": total - sub - o["shipping"],
     }
 
 
@@ -80,7 +81,7 @@ def approval_view(a) -> dict:
 # ---------------------------------------------------------------- realtime + session
 @router.get("/events")
 async def sse(request: Request):
-    q = events.subscribe()
+    q = events.subscribe(db.current())
 
     async def gen():
         try:
@@ -102,7 +103,9 @@ async def sse(request: Request):
 @router.get("/me")
 async def me(user: dict = Depends(auth.current_user)):
     u = {k: v for k, v in user.items() if not k.startswith("_")}
-    return {**u, "store": agent_settings()["storeName"], "engine": "claude" if has_model() else "offline", "model": MODEL if has_model() else None}
+    if not user.get("business") or not db.current():          # a platform administrator who has not entered a business: nothing of any business is read
+        return {**u, "store": None, "engine": "offline", "engineLabel": None, "model": None}
+    return {**u, "store": agent_settings()["storeName"], "engine": aikey.engine_id() if has_model() else "offline", "engineLabel": aikey.engine_label(), "model": aikey.model() if has_model() else None}
 
 
 # ---------------------------------------------------------------- inbox
@@ -297,6 +300,47 @@ async def orders():
     return {"items": [order_view(o) for o in db.all("SELECT * FROM orders ORDER BY created_at DESC")]}
 
 
+class LineIn(BaseModel):
+    sku: str = Field(min_length=1, max_length=40)
+    qty: int = Field(ge=1, le=500)
+
+
+class QuoteBody(BaseModel):
+    lines: list[LineIn] = Field(max_length=100)
+    zone: Literal["dhaka", "out"] = "dhaka"
+    shipping: int | None = Field(default=None, ge=0, le=10_000)
+
+
+class StaffOrderBody(QuoteBody):
+    customerId: str | None = Field(default=None, max_length=60)
+    conversationId: str | None = Field(default=None, max_length=60)
+    name: str | None = Field(default=None, max_length=100)
+    phone: str | None = Field(default=None, max_length=30)
+    address: str | None = Field(default=None, max_length=300)
+    method: str = Field(min_length=1, max_length=30)
+
+
+@router.post("/orders/quote", dependencies=[Depends(auth.require("orders.manage"))])
+async def quote_order(b: QuoteBody):
+    """What a cart a person is building would cost right now (live prices, stock, delivery). Saves nothing."""
+    return checkout.staff_quote([l.model_dump() for l in b.lines], b.zone, b.shipping)
+
+
+@router.post("/orders", dependencies=[Depends(auth.require("orders.manage"))])
+async def create_order(b: StaffOrderBody):
+    try:
+        res = checkout.staff_place(lines=[l.model_dump() for l in b.lines], zone=b.zone, name=b.name, phone=b.phone, address=b.address, method=b.method,
+                                   customer_id=b.customerId, shipping=b.shipping, conversation_id=b.conversationId, by=auth.staff())
+    except checkout.CheckoutError as e:
+        raise HTTPException(409 if e.code in ("not_ready", "insufficient_stock") else 400, e.extra.get("hint") or _STAFF_WHY.get(e.code) or checkout.explain(e)) from None
+    auth.audit("order.create", res["order"], f"{res['payment_method']} · {taka(res['total'])}" + (" · delivery charge set by hand" if b.shipping is not None else ""))
+    return {"ok": True, **res, "orderView": order_view(store.order(res["order"]))}
+
+
+_STAFF_WHY = {"not_ready": "Something in the cart is not available. Check the stock shown and try again.", "unknown_customer": "That customer no longer exists.",
+              "unknown_conversation": "That conversation no longer exists.", "over_limit": "That total is above the limit for one order."}
+
+
 @router.get("/orders/{no}/rates")
 async def order_rates(no: str):
     o = _order(no)
@@ -463,6 +507,7 @@ def _clean(b: ProductBody) -> dict:
 async def create_product(b: ProductBody):
     if db.get("SELECT 1 FROM products WHERE lower(sku)=lower(?)", [b.sku]):
         raise HTTPException(409, "A product with that SKU already exists.")
+    limits.require_product_room(1)
     v = _clean(b)
     db.run("INSERT INTO products(id,sku,name,variant,price,stock,sold30,art,description,keywords) VALUES(?,?,?,?,?,?,?,?,?,?)",
            [db.uid("p"), b.sku, v["name"], v["variant"], v["price"], v["stock"], 0, v["art"], v["description"], v["keywords"]])
@@ -512,6 +557,19 @@ async def stock(sku: str, b: StockBody):
     return {"ok": True}
 
 
+@router.post("/customers/{cid}/erase")
+async def erase_customer(cid: str, user: dict = Depends(auth.current_user)):
+    """The shop owner's data-deletion path: remove one customer's personal details (see store.erase_customer). Owners only; written in the activity log; cannot be undone."""
+    if user["role"] != "owner":
+        raise HTTPException(403, "Only an owner can erase a customer's personal data.")
+    r = store.erase_customer(cid)
+    if r is None:
+        raise HTTPException(404, "No such customer.")
+    auth.audit("customer.erase", cid, f"{r['messages']} messages, {r['orders']} orders, {r['sms']} texts cleared", actor=user)
+    emit("customers")
+    return {"ok": True, **r}
+
+
 @router.get("/customers")
 async def customers():
     out = []
@@ -550,7 +608,7 @@ async def insights():
 # ---------------------------------------------------------------- channels & integrations
 @router.get("/integrations")
 async def integrations():
-    return {"items": [dict(r) for r in db.all("SELECT * FROM integrations ORDER BY rowid")], "notifications": db.get_setting("notifications", [])}
+    return {"items": [dict(r) for r in db.all("SELECT * FROM integrations WHERE id NOT IN ('woo','shopify') ORDER BY rowid")], "notifications": db.get_setting("notifications", [])}
 
 
 class IntegrationBody(BaseModel):
@@ -579,22 +637,117 @@ async def put_notifications(b: NotifRows):
 # ---------------------------------------------------------------- assistant settings
 @router.get("/settings")
 async def get_settings():
-    return {"agent": agent_settings(), "defaults": DEFAULT_SETTINGS, "engine": "claude" if has_model() else "offline", "model": MODEL,
+    return {"agent": agent_settings(), "defaults": DEFAULT_SETTINGS, "engine": aikey.engine_id() if has_model() else "offline", "engineLabel": aikey.engine_label(), "model": aikey.model(), "keySource": aikey.source(),
             "policies": [dict(r) for r in db.all("SELECT * FROM policies ORDER BY key")]}
 
 
 @router.put("/settings", dependencies=[Depends(auth.require("settings.write"))])
 async def put_settings(body: dict):
-    allowed = {"storeName", "tone", "replyLanguage", "banglish", "bnDigits", "showTranslation", "confidence", "can", "maxOrder"}
+    allowed = {"storeName", "storeAbout", "tone", "replyLanguage", "banglish", "bnDigits", "showTranslation", "confidence", "can", "maxOrder"}
     changed = {k: v for k, v in body.items() if k in allowed}
     if "maxOrder" in changed:
         try:
             changed["maxOrder"] = max(500, min(500000, int(changed["maxOrder"])))
         except (TypeError, ValueError):
             raise HTTPException(400, "The largest order must be a number of taka.")
+    if "storeAbout" in changed:
+        changed["storeAbout"] = " ".join(str(changed["storeAbout"] or "").split())[:200]
     db.set_setting("agent", {**agent_settings(), **changed})
     auth.audit("settings.update", ", ".join(changed))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- the AI provider and its key
+def _key_view() -> dict:
+    return {**aikey.status(), "engine": aikey.engine_id() if has_model() else "offline", "engineLabel": aikey.engine_label()}
+
+
+def _fail(e: aikey.KeyError_) -> HTTPException:
+    return HTTPException(502 if e.kind == "network" else 400, str(e))
+
+
+class KeyBody(BaseModel):
+    provider: str | None = Field(default=None, max_length=20)
+    key: str | None = Field(default=None, max_length=400)
+    model: str | None = Field(default=None, max_length=120)
+    smallModel: str | None = Field(default=None, max_length=120)
+    baseUrl: str | None = Field(default=None, max_length=300)
+    skipCheck: bool = False
+
+
+class ProviderBody(BaseModel):
+    provider: str = Field(max_length=20)
+    model: str | None = Field(default=None, max_length=120)
+    smallModel: str | None = Field(default=None, max_length=120)
+    baseUrl: str | None = Field(default=None, max_length=300)
+
+
+@router.get("/assistant/key", dependencies=[Depends(auth.require("settings.write"))])
+async def get_key():
+    return _key_view()
+
+
+@router.put("/assistant/key", dependencies=[Depends(auth.require("settings.write"))])
+async def put_key(b: KeyBody):
+    """Check the key with the provider, then save it encrypted and make that provider the active one. The next customer message uses it: no restart."""
+    try:
+        pid = aikey.valid_provider(b.provider or aikey.active())
+        key = aikey.normalize_key(pid, b.key)
+        base = await aikey.validate_base(b.baseUrl or aikey.base_url("custom")) if pid == "custom" else None
+        want = (b.model or aikey.model(pid) or "").strip() or None
+        res = {"ok": True, "models": [], "modelAvailable": None, "unverified": False}
+        if not b.skipCheck:
+            res = await aikey.check(pid, key, want, base)
+    except aikey.KeyError_ as e:
+        raise _fail(e) from None
+    aikey.save(pid, key, model_=b.model, small=b.smallModel, base=base)
+    auth.audit("assistant.key_set", aikey.PROVIDERS[pid]["label"], (f"ending {key[-4:]}" if key != aikey.NO_KEY else "no key needed") + (", saved without checking" if b.skipCheck else ""))
+    emit("settings")
+    return {**_key_view(), "models": res["models"], "modelAvailable": res["modelAvailable"], "unverified": res["unverified"]}
+
+
+@router.put("/assistant/provider", dependencies=[Depends(auth.require("settings.write"))])
+async def put_provider(b: ProviderBody):
+    """Switch to a provider whose key is already saved (or change its models) without typing the key again."""
+    try:
+        pid = aikey.valid_provider(b.provider)
+        if not aikey.get_key(pid):
+            raise aikey.KeyError_(f"Add a key for {aikey.PROVIDERS[pid]['label']} first.")
+        base = await aikey.validate_base(b.baseUrl or aikey.base_url("custom")) if pid == "custom" else None
+    except aikey.KeyError_ as e:
+        raise _fail(e) from None
+    aikey.configure(pid, model_=b.model, small=b.smallModel, base=base)
+    auth.audit("assistant.provider", aikey.PROVIDERS[pid]["label"], f"model {aikey.model(pid) or 'not chosen'}")
+    emit("settings")
+    return _key_view()
+
+
+@router.post("/assistant/key/check", dependencies=[Depends(auth.require("settings.write"))])
+async def check_key(provider: str | None = None):
+    try:
+        pid = aikey.valid_provider(provider or aikey.active())
+        key = aikey.get_key(pid)
+        if not key:
+            raise aikey.KeyError_("No key is set for this provider.")
+        res = await aikey.check(pid, key, aikey.model(pid), aikey.base_url(pid))
+    except aikey.KeyError_ as e:
+        raise _fail(e) from None
+    return {**_key_view(), "models": res["models"], "modelAvailable": res["modelAvailable"], "unverified": res["unverified"]}
+
+
+@router.delete("/assistant/key", dependencies=[Depends(auth.require("settings.write"))])
+async def delete_key(provider: str | None = None):
+    """Remove the key saved in the panel for a provider. Its environment variable (if any) is used again; otherwise the offline engine answers."""
+    try:
+        pid = aikey.valid_provider(provider or aikey.active())
+    except aikey.KeyError_ as e:
+        raise _fail(e) from None
+    if not aikey.panel_key(pid):
+        raise HTTPException(409, "There is no key saved in the panel to remove.")
+    aikey.clear(pid)
+    auth.audit("assistant.key_removed", aikey.PROVIDERS[pid]["label"])
+    emit("settings")
+    return _key_view()
 
 
 class PolicyBody(BaseModel):
@@ -607,3 +760,10 @@ async def put_policy(key: str, b: PolicyBody):
     db.run("INSERT INTO policies(key,title,body) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET title=excluded.title, body=excluded.body", [key, b.title, b.body])
     auth.audit("policy.update", key)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- the business's own plan and usage
+@router.get("/plan")
+async def my_plan():
+    """What this business's plan allows and how much is used (for any member to see)."""
+    return limits.summary()

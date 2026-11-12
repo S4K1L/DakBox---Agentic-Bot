@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import catalog_search
 from .. import checkout, db, store
 from ..events import emit
 from ..util import is_dhaka, rates_for, taka
@@ -34,32 +35,32 @@ def _product_view(p) -> dict:
     return {
         "sku": p["sku"], "name": p["name"], "variant": p["variant"], "price": p["price"], "price_text": taka(p["price"]),
         "in_stock": p["stock"], "status": "out_of_stock" if p["stock"] == 0 else "low_stock" if p["stock"] <= 10 else "in_stock",
-        "description": p["description"],
+        "description": p["description"], "link": p["source_url"] if "source_url" in p.keys() else None,
     }
 
 
 def search_products_raw(query: str) -> list:
-    q = query.lower().strip()
-    if not q:
-        return []
-    words = [w for w in q.split() if len(w) > 2]
-    scored = []
-    for p in db.all("SELECT * FROM products"):
-        hay = f"{p['name']} {p['variant'] or ''} {p['sku']} {p['keywords']}".lower()
-        score = sum(1 for w in words if w in hay) + (2 if q in hay else 0)
-        if score:
-            scored.append((score, p))
-    scored.sort(key=lambda x: -x[0])
-    return [p for _, p in scored[:5]]
+    return catalog_search.search(query, 5).rows
 
 
 # ---------------------------------------------------------------- read-only tools
-def search_products(c: ToolCtx, query: str) -> Outcome:
-    rows = search_products_raw(query)
+def search_products(c: ToolCtx, query: str = "") -> Outcome:
+    r = catalog_search.search(query, 8)
+    rows = r.rows
+    match = "popular" if r.browse else ("exact" if r.matched_all else ("closest" if rows else "none"))
+    result: dict = {"count": len(rows), "match": match, "products": [_product_view(p) for p in rows]}
+    ov = catalog_search.overview()
+    if match == "popular":
+        result["hint"] = "The customer did not name a product, so these are the store's popular products. Ask what they are looking for."
+    elif match == "closest":
+        result["hint"] = f"Nothing matched every word ({', '.join(r.unmatched) or 'some of them'}). These are the closest products: say so, do not claim they are what the customer asked for."
+    elif match == "none":
+        result["hint"] = "No product matches. Tell the customer honestly that you do not have it, mention a few things the store does sell, and offer to ask a teammate."
+        result["store_sells"] = ov["examples"]
     return Outcome(
-        {"count": len(rows), "products": [_product_view(p) for p in rows]},
+        result,
         {"icon": "search", "label": "Searched the catalog", "detail": f"search_products · {len(rows)} result{'' if len(rows) == 1 else 's'} · 142 ms"},
-        rows[0]["sku"] if rows else None,
+        rows[0]["sku"] if rows and match == "exact" and len({p['name'] for p in rows}) == 1 else None,
     )
 
 
@@ -344,7 +345,7 @@ def apply_staged(conversation_id: str, customer_id: str, actions: list[dict]) ->
 # ---------------------------------------------------------------- settings
 DEFAULT_SETTINGS: dict[str, Any] = {
     "storeName": "Northwind Outdoor", "tone": "friendly", "replyLanguage": "match", "banglish": True, "bnDigits": True,
-    "showTranslation": True, "confidence": 75, "maxOrder": 20000,
+    "showTranslation": True, "confidence": 75, "maxOrder": 20000, "storeAbout": "",
     "can": {"products": True, "carts": True, "orders": True, "returns": True, "checkout": True},
 }
 
@@ -378,7 +379,7 @@ def _obj(props: dict, required: list[str] | None = None) -> dict:
 
 
 TOOL_SCHEMAS: dict[str, dict] = {
-    "search_products": {"description": "Search the store catalog by name, type, color or SKU. Returns live price and stock.", "input_schema": _obj({"query": {"type": "string", "description": 'What the customer is looking for, in English, e.g. "navy water bottle".'}}, ["query"])},
+    "search_products": {"description": "Search the store catalog by product word, color, material or SKU. Understands Bangla, Banglish and English spellings (saree, sari, shari, শাড়ি). Returns live price and stock, with a match field: exact, closest (not everything matched) or none. Pass an empty query to list popular products when the customer asks what the store sells.", "input_schema": _obj({"query": {"type": "string", "description": 'The product words the customer used, e.g. "red jamdani saree". Keep it short; if nothing is found try the simplest word. Empty to list popular products.'}})},
     "get_product": {"description": "Get one product by SKU with live price and stock.", "input_schema": _obj({"sku": {"type": "string"}}, ["sku"])},
     "get_order_status": {"description": "Look up an order. Only returns details when the customer is verified; otherwise returns verification_required and you must ask for the last 4 digits of the phone number on the order.", "input_schema": _obj({"order_number": {"type": "string", "description": "e.g. #1042"}, "phone_last4": {"type": "string", "description": "Last 4 digits of the phone on the order, if the customer gave them."}}, ["order_number"])},
     "get_policy": {"description": "Read the store policy for a topic: returns, exchange, shipping, pricing or payment. Always use this before answering a policy question.", "input_schema": _obj({"topic": {"type": "string", "enum": ["returns", "exchange", "shipping", "pricing", "payment"]}}, ["topic"])},

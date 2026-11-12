@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Request, Response
 
-from .. import db, domain, metacfg, meta, store
+from .. import db, domain, metacfg, meta, publicbiz, store
 from ..events import emit
 
 router = APIRouter()
@@ -257,8 +257,7 @@ async def handle(body: dict) -> None:
 
 
 # ---------------------------------------------------------------- routes
-@router.get("/webhooks/meta")
-async def verify(request: Request):
+def _verify(request: Request) -> Response:
     q = request.query_params
     token = metacfg.verify_token()
     if q.get("hub.mode") == "subscribe" and token and hmac.compare_digest(q.get("hub.verify_token", ""), token):
@@ -266,8 +265,7 @@ async def verify(request: Request):
     return Response("forbidden", status_code=403)
 
 
-@router.post("/webhooks/meta")
-async def receive(request: Request, tasks: BackgroundTasks):
+async def _receive(request: Request, tasks: BackgroundTasks) -> Response:
     raw = await request.body()
     if len(raw) > 2_000_000:
         return Response("too large", status_code=413)
@@ -278,5 +276,31 @@ async def receive(request: Request, tasks: BackgroundTasks):
         body = await request.json()
     except ValueError:
         return Response("bad json", status_code=400)
-    tasks.add_task(handle, body)  # reply now; Meta retries if we take longer than 5 seconds
+    tasks.add_task(handle, body)  # reply now; Meta retries if we take longer than 5 seconds. The task keeps this request's business.
     return Response("ok")
+
+
+# Each business gives Meta its own address, /webhooks/meta/<slug>, and verifies with its own app secret and token.
+# The original /webhooks/meta keeps working for the default business (single-business installs).
+@router.get("/webhooks/meta/{slug}")
+async def verify_for(slug: str, request: Request):
+    publicbiz.enter(slug)
+    return _verify(request)
+
+
+@router.post("/webhooks/meta/{slug}")
+async def receive_for(slug: str, request: Request, tasks: BackgroundTasks):
+    publicbiz.enter(slug)
+    return await _receive(request, tasks)
+
+
+@router.get("/webhooks/meta")
+async def verify(request: Request):
+    publicbiz.enter(None)
+    return _verify(request)
+
+
+@router.post("/webhooks/meta")
+async def receive(request: Request, tasks: BackgroundTasks):
+    publicbiz.enter(None)
+    return await _receive(request, tasks)

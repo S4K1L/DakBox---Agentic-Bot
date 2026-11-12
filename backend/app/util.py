@@ -29,7 +29,8 @@ BANGLISH = set(
     """ami amar apni apnar apnara ache achhe nai nei kothay kothai koto kotodin korbo korte kore korun parbo parben pabo jonno chai chaichi den din dibo
     dite lagbe hobe hoyeche hoy ta ti ki kemon bhai apu vai dhonnobad dhonnobaad thik accha achha bolen bolun jante janaben pathan pathiye nibo nite
     ekta duita shob sob onek kom beshi dam taka bhalo kharap vege gese gelo ase asche asbe jay jabe ekhane ekhon ajke kal agei pore tahole kintu othoba
-    naki eta ota ei oi amake amader tomar apnake""".split()
+    naki eta ota ei oi amake amader tomar apnake apnader kache kachhe dekhan dekhao dekhaben dao dibe diben kinbo kinte kinbe pai paoa pawa dekhte tar tader
+    onno arekta aro aaro thakle thake thakbe jiggesh jigesh bujhlam bujhi kisu kichu kichhu""".split()
 )
 
 

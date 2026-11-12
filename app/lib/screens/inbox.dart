@@ -8,6 +8,7 @@ import '../core/format.dart';
 import '../core/state.dart';
 import '../widgets/kit.dart';
 import '../widgets/page.dart' show SinglePane;
+import 'new_order.dart';
 
 bool hasBangla(String s) => RegExp(r'[ঀ-৿]').hasMatch(s);
 TextStyle bubbleStyle(String text, Color color, {double size = 14.5}) => hasBangla(text) ? TypeX.bn(size, color: color) : TypeX.ui(size, color: color, h: 1.45);
@@ -359,38 +360,53 @@ class _ThreadHeader extends StatelessWidget {
     final cust = conv['customer'] as J;
     final ch = conv['channel'] as J;
     final win = conv['window'] as J;
-    final narrow = MediaQuery.of(context).size.width < 1100;
     final phone = SinglePane.of(context);
     final resolved = conv['status'] == 'resolved';
+    final canReply = s.can('conv.reply');
+    final winOpen = win['open'] == true;
+    final showWin = ch['kind'] != 'web';
+    Widget dot() => Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Container(width: 3, height: 3, decoration: BoxDecoration(color: c.text3.withValues(alpha: .6), shape: BoxShape.circle)));
     return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      height: 68,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       decoration: BoxDecoration(color: c.surface, border: Border(bottom: BorderSide(color: c.line))),
       child: Row(children: [
-        if (phone) DkIconButton(PhosphorIconsBold.arrowLeft, onPressed: s.closeThread),
-        Avatar(name: cust['name'] as String, hue: cust['hue'] as num, size: 42),
+        if (phone) ...[DkIconButton(PhosphorIconsBold.arrowLeft, onPressed: s.closeThread), const SizedBox(width: 4)],
+        Avatar(name: cust['name'] as String, hue: cust['hue'] as num, size: 40),
         const SizedBox(width: 12),
         Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(cust['name'] as String, maxLines: 1, overflow: TextOverflow.ellipsis, style: TypeX.display(17, color: c.text, ls: -.01)),
-            const SizedBox(height: 3),
-            Row(children: [
-              ChannelIcon(kind: ch['kind'] as String, size: 16),
-              const SizedBox(width: 6),
-              Flexible(child: Text('${channelName(ch['kind'] as String)} · ${ch['handle']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TypeX.ui(12.5, color: c.text3))),
-              if (!phone) ...[const SizedBox(width: 8), Tag(langLabel(cust['lang'] as String), tone: 'accent', small: true)],
-            ]),
-          ]),
+          child: LayoutBuilder(builder: (context, box) {
+            final w = box.maxWidth;
+            return Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Flexible(child: Text(cust['name'] as String, maxLines: 1, overflow: TextOverflow.ellipsis, style: TypeX.display(16, color: c.text, ls: -.01))),
+                if (showWin && w > 250) ...[
+                  const SizedBox(width: 10),
+                  Container(width: 6, height: 6, decoration: BoxDecoration(color: winOpen ? c.ok : c.danger, shape: BoxShape.circle)),
+                  const SizedBox(width: 5),
+                  Text(winOpen ? windowLeft(win['expiresAt'] as String?) : 'Window closed', maxLines: 1, style: TypeX.ui(12, w: FontWeight.w600, color: winOpen ? c.ok : c.danger)),
+                ],
+              ]),
+              const SizedBox(height: 2),
+              Row(children: [
+                ChannelIcon(kind: ch['kind'] as String, size: 14),
+                const SizedBox(width: 6),
+                Flexible(child: Text('${channelName(ch['kind'] as String)} · ${ch['handle']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TypeX.ui(12.5, color: c.text3))),
+                if (!phone && w > 330) ...[dot(), Text(langLabel(cust['lang'] as String), maxLines: 1, style: TypeX.ui(12.5, color: c.text3))],
+              ]),
+            ]);
+          }),
         ),
-        if (cust['lang'] != 'en') DkIconButton(PhosphorIconsRegular.translate, tooltip: 'Show English translation', active: showTr, onPressed: onToggleTr),
-        if (!narrow && ch['kind'] != 'web') Padding(padding: const EdgeInsets.only(right: 8), child: Tag(win['open'] == true ? windowLeft(win['expiresAt'] as String?) : 'Window closed', tone: win['open'] == true ? 'ok' : 'danger', dot: true)),
-        if (!phone)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-            child: IgnorePointer(ignoring: !s.can('conv.reply'), child: Opacity(opacity: s.can('conv.reply') ? 1 : .5, child: Seg<String>(items: const [('agent', 'Assistant'), ('hybrid', 'Review'), ('human', 'Me')], value: conv['mode'] as String, onChanged: s.setMode, small: true))),
-          ),
-        if (!phone) DkButton(resolved ? 'Reopen' : 'Resolve', icon: resolved ? PhosphorIconsRegular.arrowCounterClockwise : PhosphorIconsBold.check, small: true, onPressed: s.can('conv.reply') ? () => s.resolve(resolved) : null),
-        DkIconButton(PhosphorIconsRegular.sidebarSimple, tooltip: 'Customer details', active: details, onPressed: onToggleDetails),
-        if (phone) DkIconButton(PhosphorIconsRegular.dotsThreeVertical, onPressed: () => _sheet(context, conv)),
+        const SizedBox(width: 12),
+        if (!phone) ...[
+          IgnorePointer(ignoring: !canReply, child: Opacity(opacity: canReply ? 1 : .5, child: Seg<String>(items: const [('agent', 'Assistant'), ('hybrid', 'Review'), ('human', 'Me')], value: conv['mode'] as String, onChanged: s.setMode, small: true))),
+          const SizedBox(width: 12),
+          DkButton(resolved ? 'Reopen' : 'Resolve', icon: resolved ? PhosphorIconsRegular.arrowCounterClockwise : PhosphorIconsBold.check, small: true, onPressed: canReply ? () => s.resolve(resolved) : null),
+          Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Container(width: 1, height: 24, color: c.line)),
+        ],
+        if (cust['lang'] != 'en') DkIconButton(PhosphorIconsRegular.translate, tooltip: 'Show English translation', active: showTr, size: 36, onPressed: onToggleTr),
+        DkIconButton(PhosphorIconsRegular.sidebarSimple, tooltip: 'Customer details', active: details, size: 36, onPressed: onToggleDetails),
+        if (phone) DkIconButton(PhosphorIconsRegular.dotsThreeVertical, size: 36, onPressed: () => _sheet(context, conv)),
       ]),
     );
   }
@@ -713,7 +729,7 @@ class _DraftCardState extends State<_DraftCard> {
                           color: c.okSoft, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
                           child: Row(children: [
                             Icon(PhosphorIconsBold.plus, size: 13, color: c.ok), const SizedBox(width: 8),
-                            Expanded(child: Text('${d['name']} · ${d['variant']} · Qty ${d['qty']}', style: TypeX.ui(12.5, w: FontWeight.w700, color: c.ok))),
+                            Expanded(child: Text('${d['name']}${d['variant'] != null ? ' · ${d['variant']}' : ''} · Qty ${d['qty']}', style: TypeX.ui(12.5, w: FontWeight.w700, color: c.ok))),
                             Text(taka((d['price'] as num) * (d['qty'] as num)), style: TypeX.mono(12.5, color: c.ok)),
                           ]),
                         ),
@@ -1104,7 +1120,7 @@ class _ContextPanel extends StatelessWidget {
               trailing: cart.isEmpty && pendingLines.isEmpty ? null : Text(taka(cartTotal), style: TypeX.mono(12.5, w: FontWeight.w700, color: c.text)),
               child: cart.isEmpty && pendingLines.isEmpty
                   ? Text('Nothing in the cart.', style: TypeX.ui(13, color: c.text3))
-                  : Column(children: [
+                  : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       for (final l in cart)
                         Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(children: [
                           Container(width: 26, height: 26, alignment: Alignment.center, decoration: BoxDecoration(color: c.sunken, borderRadius: BorderRadius.circular(8)), child: Text('${l['qty']}', style: TypeX.ui(12, w: FontWeight.w800, color: c.text2))),
@@ -1119,6 +1135,7 @@ class _ContextPanel extends StatelessWidget {
                           Expanded(child: Text('${d['name']} · awaiting approval', maxLines: 1, overflow: TextOverflow.ellipsis, style: TypeX.ui(13, w: FontWeight.w600, color: c.warn))),
                           Text(taka((d['price'] as num) * (d['qty'] as num)), style: TypeX.mono(12.5, color: c.warn)),
                         ])),
+                      if (cart.isNotEmpty && s.can('orders.manage')) Padding(padding: const EdgeInsets.only(top: 8), child: DkButton('Create order from cart', icon: PhosphorIconsBold.shoppingCartSimple, kind: BtnKind.soft, small: true, expand: true, onPressed: () => showNewOrder(context, conv: conv))),
                     ]),
             ),
 

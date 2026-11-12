@@ -12,17 +12,20 @@ class PageHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.c;
-    final narrow = MediaQuery.of(context).size.width < 700;
-    final head = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(title, style: TypeX.display(narrow ? 24 : 28, color: c.text)),
-      if (subtitle != null) ...[const SizedBox(height: 5), subtitle!],
-    ]);
-    return Padding(
-      padding: EdgeInsets.fromLTRB(pad, pad - 2, pad, 14),
-      child: narrow || actions.isEmpty
-          ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [head, if (actions.isNotEmpty) ...[const Gap(12), Wrap(spacing: 8, runSpacing: 8, children: actions)]])
-          : Row(crossAxisAlignment: CrossAxisAlignment.end, children: [Expanded(child: head), const SizedBox(width: 16), ...actions.expand((a) => [a, const SizedBox(width: 8)]).toList()..removeLast()]),
-    );
+    return LayoutBuilder(builder: (context, box) {
+      // Judge by the room this header really has (a list beside a detail pane is narrow on a wide screen), not by the window.
+      final narrow = box.maxWidth < 640;
+      final head = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: TypeX.display(narrow ? 24 : 28, color: c.text)),
+        if (subtitle != null) ...[const SizedBox(height: 5), subtitle!],
+      ]);
+      return Padding(
+        padding: EdgeInsets.fromLTRB(pad, pad - 2, pad, 14),
+        child: narrow || actions.isEmpty
+            ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [head, if (actions.isNotEmpty) ...[const Gap(12), Wrap(spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: actions)]])
+            : Row(crossAxisAlignment: CrossAxisAlignment.end, children: [Expanded(child: head), const SizedBox(width: 16), ...actions.expand((a) => [a, const SizedBox(width: 8)]).toList()..removeLast()]),
+      );
+    });
   }
 }
 

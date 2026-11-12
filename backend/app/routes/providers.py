@@ -7,7 +7,7 @@ import secrets as pysecrets
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .. import auth, db, metacfg, sms
+from .. import auth, db, metacfg, publicbiz, sms
 from ..providers import aamarpay, alphasms, bkash, common, sslcommerz, sslwireless, steadfast
 from ..providers.common import ProviderError
 from ..secrets_store import mask
@@ -77,15 +77,18 @@ def _base(request: Request) -> str:
 
 
 def _urls(pid: str, base: str, cfg: dict) -> list[dict]:
+    seg = publicbiz.seg()
+    hooks = f"{base}/hooks{seg}"
+    base = f"{base}/pay{seg}"                       # every address below names this business, so the gateway's call reaches the right one
     if pid == "sslcommerz":
-        return [{"label": "Success URL", "url": f"{base}/pay/sslcommerz/success"}, {"label": "Fail URL", "url": f"{base}/pay/sslcommerz/fail"},
-                {"label": "Cancel URL", "url": f"{base}/pay/sslcommerz/cancel"}, {"label": "IPN listener (set in the SSLCOMMERZ panel, IPN Settings)", "url": f"{base}/pay/sslcommerz/ipn"}]
+        return [{"label": "Success URL", "url": f"{base}/sslcommerz/success"}, {"label": "Fail URL", "url": f"{base}/sslcommerz/fail"},
+                {"label": "Cancel URL", "url": f"{base}/sslcommerz/cancel"}, {"label": "IPN listener (set in the SSLCOMMERZ panel, IPN Settings)", "url": f"{base}/sslcommerz/ipn"}]
     if pid == "bkash":
-        return [{"label": "Callback URL (sent with every payment, nothing to configure)", "url": f"{base}/pay/bkash/callback"}]
+        return [{"label": "Callback URL (sent with every payment, nothing to configure)", "url": f"{base}/bkash/callback"}]
     if pid == "aamarpay":
-        return [{"label": "Success / fail / cancel URLs (sent with every payment)", "url": f"{base}/pay/aamarpay/success"}, {"label": "IPN listener (give this to aamarPay support)", "url": f"{base}/pay/aamarpay/ipn"}]
+        return [{"label": "Success / fail / cancel URLs (sent with every payment)", "url": f"{base}/aamarpay/success"}, {"label": "IPN listener (give this to aamarPay support)", "url": f"{base}/aamarpay/ipn"}]
     if pid == "steadfast":
-        return [{"label": "Webhook URL (paste into Steadfast, with the secret below as the Bearer token)", "url": f"{base}/hooks/steadfast"}]
+        return [{"label": "Webhook URL (paste into Steadfast, with the secret below as the Bearer token)", "url": f"{hooks}/steadfast"}]
     return []
 
 

@@ -8,6 +8,7 @@ import '../core/state.dart';
 import '../core/format.dart';
 import '../widgets/kit.dart';
 import '../widgets/page.dart';
+import 'ai_key_ui.dart';
 import 'inbox.dart' show showSimulator;
 
 class AssistantScreen extends StatefulWidget {
@@ -21,14 +22,16 @@ class _AssistantScreenState extends State<AssistantScreen> {
   @override
   void initState() {
     super.initState();
-    context.read<AppState>().loadSettings();
+    final st = context.read<AppState>();
+    st.loadSettings();
+    if (st.assistantTab != null) { tab = st.assistantTab!; st.assistantTab = null; }
   }
 
   @override
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
     final c = context.c;
-    final claude = s.settings?['engine'] == 'claude';
+    final claude = s.settings?['engine'] != null && s.settings?['engine'] != 'offline';
     return Panel(
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         PageHeader(
@@ -45,7 +48,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
               final can = (a['can'] as Map).cast<String, dynamic>();
               final ordering = can['carts'] == true && can['checkout'] != false;
               return Row(children: [
-                StatTile(value: claude ? 'Claude' : 'Offline', label: claude ? '${s.settings!['model']}' : 'Rules engine, no API key', icon: PhosphorIconsFill.sparkle, tone: claude ? 'ok' : 'warn'),
+                StatTile(value: claude ? '${s.settings!['engineLabel'] ?? 'AI'}' : 'Offline', label: claude ? '${s.settings!['model']}' : 'Rules engine, no AI key', icon: PhosphorIconsFill.sparkle, tone: claude ? 'ok' : 'warn', active: tab == 'engine', onTap: () => setState(() => tab = 'engine')),
                 const SizedBox(width: 8),
                 StatTile(value: ordering ? 'On' : 'Off', label: ordering ? 'Orders in chat, up to ${taka((a['maxOrder'] ?? 20000) as num)}' : 'Orders in chat', icon: PhosphorIconsRegular.shoppingBag, tone: ordering ? 'ok' : ''),
                 const SizedBox(width: 8),
@@ -55,13 +58,14 @@ class _AssistantScreenState extends State<AssistantScreen> {
               ]);
             }),
           ),
-        UnderTabs(value: tab, onChanged: (v) => setState(() => tab = v), tabs: const [('behavior', 'Behavior', null), ('knowledge', 'Knowledge', null), ('try', 'Try it', null)]),
+        UnderTabs(value: tab, onChanged: (v) => setState(() => tab = v), tabs: const [('behavior', 'Behavior', null), ('knowledge', 'Knowledge', null), ('engine', 'Engine and key', null), ('try', 'Try it', null)]),
         Expanded(
           child: s.settings == null
               ? Center(child: CircularProgressIndicator(color: c.primary, strokeWidth: 3))
               : switch (tab) {
                   'knowledge' => _Locked(locked: !s.can('settings.write'), what: 'edit the assistant’s knowledge', child: const _Knowledge()),
-                  'try' => _Locked(locked: !s.can('simulate'), what: 'send test messages', child: _TryIt(claude: claude)),
+                  'engine' => const AiEngineTab(),
+                  'try' => _Locked(locked: !s.can('simulate'), what: 'send test messages', child: const _TryIt()),
                   _ => _Locked(locked: !s.can('settings.write'), what: 'change the assistant’s behavior', child: const _Behavior()),
                 },
         ),
@@ -145,6 +149,7 @@ class _Behavior extends StatelessWidget {
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 820),
         child: ListView(padding: const EdgeInsets.all(24), children: [
+          _Card(title: 'About the store', icon: PhosphorIconsRegular.storefront, subtitle: 'Tell the assistant, in a few words, what you sell.', children: [const _About()]),
           _Card(title: 'What the assistant can do', icon: PhosphorIconsFill.sparkle, subtitle: 'Anything switched off here, the assistant will not do.', children: [
             _Row(title: 'Answer product questions', body: 'Uses live catalog data for price and stock.', trailing: DkSwitch(value: can['products'] == true, onChanged: (v) => setCan('products', v))),
             _Row(title: 'Build carts', body: 'The customer confirms every cart change. In Review mode a person approves it too.', trailing: DkSwitch(value: can['carts'] == true, onChanged: (v) => setCan('carts', v))),
@@ -244,8 +249,7 @@ class _PolicyCardState extends State<_PolicyCard> {
 }
 
 class _TryIt extends StatelessWidget {
-  const _TryIt({required this.claude});
-  final bool claude;
+  const _TryIt();
   static const prompts = [
     ('ms', 'Do you have a navy water bottle?'),
     ('wa', 'আসসালামু আলাইকুম, তাঁবু আছে?'),
@@ -259,19 +263,14 @@ class _TryIt extends StatelessWidget {
     final s = context.read<AppState>();
     final c = context.c;
     final origin = Uri.base.hasAuthority ? Uri.base.origin : 'https://YOUR-DOMAIN';
-    final embed = '<iframe src="$origin/widget" style="position:fixed;right:20px;bottom:20px;width:380px;height:620px;border:0;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,.25)"></iframe>';
+    final slug = (s.me['business'] as Map?)?['slug'] as String?;
+    final widgetPath = slug == null || slug == 'default' ? '/widget' : '/widget?b=$slug';        // each business has its own chat page; the default keeps the original address
+    final embed = '<iframe src="$origin$widgetPath" style="position:fixed;right:20px;bottom:20px;width:380px;height:620px;border:0;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,.25)"></iframe>';
     return Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 820),
         child: ListView(padding: const EdgeInsets.all(24), children: [
-          _Card(title: 'Engine', icon: PhosphorIconsRegular.heartbeat, children: [
-            _Row(
-              title: claude ? 'Claude is answering' : 'Offline rules are answering',
-              body: claude ? 'Using ${s.settings!['model']} with tool use against your catalog, orders and policies.' : 'No ANTHROPIC_API_KEY is set, so a built-in rule engine runs the same tools. Add a key to backend/.env and restart to switch to Claude.',
-              trailing: Tag(claude ? 'Claude live' : 'Offline', tone: claude ? 'ok' : 'ai', dot: true),
-            ),
-          ]),
           _Card(title: 'Try a conversation', icon: PhosphorIconsRegular.chatCircleDots, subtitle: 'Send a test message as a customer.', children: [
             Text('Tap a message to send it as a customer on that channel. Watch it appear in the Inbox with the assistant’s tool activity.', style: TypeX.ui(13, color: c.text3, h: 1.45)),
             Wrap(spacing: 10, runSpacing: 10, children: [
@@ -292,11 +291,45 @@ class _TryIt extends StatelessWidget {
             Align(alignment: Alignment.centerLeft, child: DkButton('Write your own', icon: PhosphorIconsRegular.pencilSimple, onPressed: () => showSimulator(context))),
           ]),
           _Card(title: 'Website chat widget', icon: PhosphorIconsRegular.globeHemisphereEast, children: [
-            _Row(title: 'Embed on your site', body: 'The widget is served by this backend at /widget. It speaks Bangla and English and always offers “Talk to a person”.', trailing: DkButton('Copy code', icon: PhosphorIconsRegular.copy, small: true, onPressed: () { Clipboard.setData(ClipboardData(text: embed)); s.toast('Embed code copied'); })),
+            _Row(title: 'Embed on your site', body: 'The widget is served by this backend at $widgetPath. It speaks Bangla and English and always offers “Talk to a person”.', trailing: DkButton('Copy code', icon: PhosphorIconsRegular.copy, small: true, onPressed: () { Clipboard.setData(ClipboardData(text: embed)); s.toast('Embed code copied'); })),
             Container(width: double.infinity, padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: c.sunken, borderRadius: BorderRadius.circular(12)), child: SelectableText(embed, style: TypeX.mono(11.5, color: c.text2))),
           ]),
         ]),
       ),
     );
+  }
+}
+
+
+/// One line about what the store sells. The assistant reads it first, so it answers like a shop of that kind from the first message.
+class _About extends StatefulWidget {
+  const _About();
+  @override
+  State<_About> createState() => _AboutState();
+}
+
+class _AboutState extends State<_About> {
+  late final ctl = TextEditingController(text: (context.read<AppState>().settings?['agent']?['storeAbout'] ?? '') as String);
+  bool saved = false;
+
+  @override
+  void dispose() { ctl.dispose(); super.dispose(); }
+
+  Future<void> _save() async {
+    await context.read<AppState>().saveSettings({'storeAbout': ctl.text.trim()});
+    if (mounted) setState(() => saved = true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+        Expanded(child: DkField(controller: ctl, hint: 'For example: handloom sarees, panjabis and women’s clothing', onSubmitted: (_) => _save())),
+        const SizedBox(width: 10),
+        DkButton('Save', kind: BtnKind.primary, onPressed: _save),
+      ]),
+      Padding(padding: const EdgeInsets.only(top: 8), child: Text(saved ? 'Saved. The assistant uses it from the next message.' : 'Optional. If you leave it empty, the assistant looks at your product list instead.', style: TypeX.ui(12, color: saved ? c.ok : c.text3))),
+    ]);
   }
 }

@@ -178,7 +178,7 @@ class ChannelIcon extends StatelessWidget {
   }
 }
 
-String channelName(String? kind) => switch (kind) { 'wa' => 'WhatsApp', 'ms' => 'Messenger', 'ig' => 'Instagram', _ => 'Web chat' };
+String channelName(String? kind) => switch (kind) { 'wa' => 'WhatsApp', 'ms' => 'Messenger', 'ig' => 'Instagram', 'store' => 'In store', 'site' => 'Website', _ => 'Web chat' };
 
 class AiMark extends StatelessWidget {
   const AiMark({super.key, this.size = 22});
@@ -475,6 +475,28 @@ class ProductArt extends StatelessWidget {
         borderRadius: BorderRadius.circular(radius ?? size * .22),
         child: SizedBox(width: size, height: size, child: CustomPaint(painter: _ArtPainter(kind ?? ''))),
       );
+}
+
+/// A product's photo when it has one (imported from a website), otherwise the drawn illustration. Photos live on other
+/// websites, so on the web they fall back to a plain <img> when the site does not allow canvas access.
+class ProductPhoto extends StatelessWidget {
+  const ProductPhoto({super.key, required this.image, required this.kind, this.size = 48, this.radius});
+  final String? image, kind;
+  final double size;
+  final double? radius;
+  @override
+  Widget build(BuildContext context) {
+    final art = ProductArt(kind: kind, size: size, radius: radius);
+    if (image == null || image!.isEmpty) return art;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(radius ?? size * .22),
+      child: SizedBox(
+        width: size, height: size,
+        child: Image.network(image!, fit: BoxFit.cover, webHtmlElementStrategy: WebHtmlElementStrategy.fallback, gaplessPlayback: true,
+            errorBuilder: (_, __, ___) => art, loadingBuilder: (_, child, p) => p == null ? child : art),
+      ),
+    );
+  }
 }
 
 class _ArtPainter extends CustomPainter {

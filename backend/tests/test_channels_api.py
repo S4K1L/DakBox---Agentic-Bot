@@ -35,7 +35,7 @@ async def test_connect_validates_stores_encrypted_and_subscribes(http, graph):
     assert out["subscription"]["ok"] is True
     assert any(c["path"].endswith("/102290129340398/subscribed_apps") for c in graph.calls)
     row = db.get("SELECT credentials FROM channels WHERE id=?", [ch["id"]])
-    assert TOKEN not in row["credentials"] and row["credentials"].startswith("gAAAA")   # Fernet ciphertext, not the token
+    assert TOKEN not in row["credentials"] and row["credentials"].startswith("b1.gAAAA")   # Fernet ciphertext, not the token
 
 
 async def test_the_token_never_appears_in_any_response(http, graph):

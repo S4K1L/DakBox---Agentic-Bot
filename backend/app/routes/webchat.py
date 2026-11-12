@@ -8,12 +8,12 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-from .. import db, domain
+from .. import db, domain, publicbiz
 from ..agent.tools import agent_settings
 
 router = APIRouter()
 SID = re.compile(r"^[a-z0-9]{16,40}$")
-_last: dict[str, float] = {}
+_last: dict[tuple[str, str], float] = {}
 
 
 def _conv_for(sid: str):
@@ -26,16 +26,20 @@ def _conv_for(sid: str):
 class SendBody(BaseModel):
     sid: str
     text: str = Field(min_length=1, max_length=1000)
+    b: str | None = Field(default=None, max_length=60)       # which business's chat this is (its address name); empty = the default business
 
 
 @router.post("/api/webchat/send")
 async def send(b: SendBody):
+    bid = publicbiz.enter(b.b)
     if not SID.match(b.sid):
         raise HTTPException(400, "bad request")
     t = time.time()
-    if t - _last.get(b.sid, 0) < 0.6:
+    if len(_last) > 5000:
+        _last.clear()
+    if t - _last.get((bid, b.sid), 0) < 0.6:
         raise HTTPException(429, "slow down")
-    _last[b.sid] = t
+    _last[(bid, b.sid)] = t
     ch = db.get("SELECT id FROM channels WHERE kind='web' ORDER BY created_at LIMIT 1")
     if not ch:
         raise HTTPException(503, "web chat is off")
@@ -45,7 +49,8 @@ async def send(b: SendBody):
 
 
 @router.get("/api/webchat/messages")
-async def messages(sid: str, after: int = 0):
+async def messages(sid: str, after: int = 0, b: str | None = None):
+    publicbiz.enter(b)
     if not SID.match(sid):
         raise HTTPException(400, "bad request")
     conv = _conv_for(sid)
@@ -63,10 +68,12 @@ async def messages(sid: str, after: int = 0):
 
 class HumanBody(BaseModel):
     sid: str
+    b: str | None = Field(default=None, max_length=60)
 
 
 @router.post("/api/webchat/human")
 async def human(b: HumanBody):
+    publicbiz.enter(b.b)
     if not SID.match(b.sid):
         raise HTTPException(400, "bad request")
     conv = _conv_for(b.sid)
@@ -78,9 +85,12 @@ async def human(b: HumanBody):
 
 
 @router.get("/widget", response_class=HTMLResponse)
-async def widget():
+async def widget(b: str | None = None):
+    publicbiz.enter(b)
     name = agent_settings()["storeName"]
-    return WIDGET.replace("__INITIAL__", name[:1]).replace("__STORE__", name)
+    key = (b or "").lower() if re.fullmatch(r"[A-Za-z0-9-]{0,60}", b or "") else ""
+    html_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return WIDGET.replace("__INITIAL__", html_name[:1]).replace("__STORE__", html_name).replace("__B__", key)
 
 
 WIDGET = r"""<!doctype html><html lang="bn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -118,19 +128,19 @@ form button{width:44px;height:44px;border-radius:50%;border:0;background:linear-
 <script>
 const T={bn:{st:'সহকারী · কয়েক সেকেন্ডেই উত্তর',disc:'আপনি স্বয়ংক্রিয় সহকারীর সাথে কথা বলছেন।',human:'মানুষের সাথে কথা বলুন',ph:'মেসেজ লিখুন',hi:'আসসালামু আলাইকুম! আমি পণ্য খুঁজে দিতে, অর্ডারের অবস্থা জানাতে আর রিটার্নের নিয়ম বলতে পারি। কী লাগবে?',c:['ওয়াটার বোতল খুঁজুন','আমার অর্ডার ট্র্যাক করুন','রিটার্নের নিয়ম'],call:'একজন মানুষকে ডেকে আনছি। একটু অপেক্ষা করুন।'},
 en:{st:'Assistant · replies in seconds',disc:"You're chatting with an automated assistant.",human:'Talk to a person',ph:'Type a message',hi:'Hello! I can help you find products, check an order, or answer questions about returns. What do you need?',c:['Find a water bottle','Track my order','Return policy'],call:'Calling a person now. Please wait a moment.'}};
-let L='bn',sid=localStorage.getItem('dk_sid');if(!sid){sid=Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(36).padStart(2,'0')).join('').slice(0,20)+'x1';localStorage.setItem('dk_sid',sid)}
+const B='__B__';let L='bn',sid=localStorage.getItem('dk_sid'+B);if(!sid){sid=Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(36).padStart(2,'0')).join('').slice(0,20)+'x1';localStorage.setItem('dk_sid'+B,sid)}
 const $=s=>document.querySelector(s),log=$('#log');let after=0,typing=null;
 const ICON={bottle:'🧴',tent:'⛺',boot:'🥾',jacket:'🧥'};
 function add(cls,html){const d=document.createElement('div');d.className=cls;d.innerHTML=html;log.appendChild(d);log.scrollTop=log.scrollHeight;return d}
 const esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function ui(){const t=T[L];$('#st').textContent=t.st;$('#disc').textContent=t.disc;$('#human').textContent=t.human;$('#in').placeholder=t.ph;document.documentElement.lang=L}
 function greet(){const t=T[L];add('note',esc(t.disc));add('m bot',esc(t.hi));const c=add('chips','');t.c.forEach(x=>{const b=document.createElement('button');b.textContent=x;b.onclick=()=>send(x);c.appendChild(b)})}
-async function send(text){if(!text.trim())return;add('m me',esc(text));$('#in').value='';showTyping();await fetch('/api/webchat/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sid,text})})}
+async function send(text){if(!text.trim())return;add('m me',esc(text));$('#in').value='';showTyping();await fetch('/api/webchat/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sid,text,b:B||null})})}
 function showTyping(){hideTyping();typing=add('m bot','<span class="dots"><i></i><i></i><i></i></span>')}
 function hideTyping(){typing&&typing.remove();typing=null}
-async function poll(){try{const r=await (await fetch('/api/webchat/messages?sid='+sid+'&after='+after)).json();for(const m of r.items){after=Math.max(after,m.id);if(m.role==='me'){continue}hideTyping();add('m '+m.role,esc(m.text));if(m.product){const p=m.product;add('prod','<div class="art" style="background:#eef2ff">'+(ICON[p.art]||'📦')+'</div><div class="in"><span class="pr">৳'+p.price.toLocaleString('en-IN')+'</span><b>'+esc(p.name)+'</b><span>'+esc(p.variant||'')+' · '+(p.stock>0?p.stock+' in stock':'Out of stock')+'</span></div>')}}}catch(e){}}
+async function poll(){try{const r=await (await fetch('/api/webchat/messages?sid='+sid+'&after='+after+(B?'&b='+encodeURIComponent(B):''))).json();for(const m of r.items){after=Math.max(after,m.id);if(m.role==='me'){continue}hideTyping();add('m '+m.role,esc(m.text));if(m.product){const p=m.product;add('prod','<div class="art" style="background:#eef2ff">'+(ICON[p.art]||'📦')+'</div><div class="in"><span class="pr">৳'+p.price.toLocaleString('en-IN')+'</span><b>'+esc(p.name)+'</b><span>'+esc(p.variant||'')+' · '+(p.stock>0?p.stock+' in stock':'Out of stock')+'</span></div>')}}}catch(e){}}
 $('#f').onsubmit=e=>{e.preventDefault();send($('#in').value)};
-$('#human').onclick=async()=>{add('m bot',esc(T[L].call));await fetch('/api/webchat/human',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sid})})};
+$('#human').onclick=async()=>{add('m bot',esc(T[L].call));await fetch('/api/webchat/human',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sid,b:B||null})})};
 document.querySelectorAll('.lang button').forEach(b=>b.onclick=()=>{L=b.dataset.l;document.querySelectorAll('.lang button').forEach(x=>x.classList.toggle('on',x===b));ui();if(!after){log.innerHTML='';greet()}});
 ui();greet();setInterval(poll,1500);poll();
 </script></body></html>"""

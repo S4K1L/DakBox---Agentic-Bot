@@ -393,7 +393,7 @@ DEMO_TEMPLATES = [
     {"name": "order_followup", "language": "en", "category": "UTILITY", "body": "Hello {{1}}, we are following up on your request. Reply here and we can continue.", "params": ["1"], "label": "Follow-up (English)"},
 ]
 
-_tpl_cache: dict[str, tuple[float, list[dict]]] = {}
+_tpl_cache: dict[tuple, tuple[float, list[dict]]] = {}
 
 
 def simplify_template(t: dict) -> dict | None:
@@ -413,7 +413,7 @@ async def list_templates(channel) -> list[dict]:
     waba = config(channel).get("waba_id")
     if not waba:
         raise MetaError("param", "Add the WhatsApp Business Account ID to this channel to list templates.")
-    hit = _tpl_cache.get(channel["id"])
+    hit = _tpl_cache.get((db.current(), channel["id"]))
     if hit and time.time() - hit[0] < 300:
         return hit[1]
     d = await _call("GET", f"{graph_base()}/{version()}/{waba}/message_templates", token=token_of(channel),
@@ -425,7 +425,7 @@ async def list_templates(channel) -> list[dict]:
         s = simplify_template(t)
         if s:
             out.append(s)
-    _tpl_cache[channel["id"]] = (time.time(), out)
+    _tpl_cache[(db.current(), channel["id"])] = (time.time(), out)
     return out
 
 

@@ -7,6 +7,7 @@ import '../core/format.dart';
 import '../core/state.dart';
 import '../widgets/kit.dart';
 import '../widgets/page.dart';
+import 'catalog_ui.dart';
 
 String stockState(int n) => n == 0 ? 'out' : (n <= 10 ? 'low' : 'ok');
 
@@ -47,7 +48,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
             Text('Live numbers the assistant quotes to customers. Changes save instantly.', style: TypeX.ui(13.5, color: c.text3)),
             const Tag('Sample catalog', tone: 'warn', small: true),
           ]),
-          actions: [SearchBox(hint: 'Search products', width: 230, onChanged: s.setProductQuery), if (s.can('products.manage')) DkButton('Add product', icon: PhosphorIconsBold.plus, kind: BtnKind.primary, onPressed: () => showDialog<void>(context: context, barrierColor: Colors.black.withValues(alpha: .45), builder: (_) => const _ProductDialog())), DkButton('Refresh', icon: PhosphorIconsRegular.arrowsClockwise, onPressed: () => s.loadProducts().then((_) => s.toast('Stock is up to date')))],
+          actions: [SearchBox(hint: 'Search products', width: 230, onChanged: s.setProductQuery), if (s.can('products.manage')) DkButton('Import from website', icon: PhosphorIconsRegular.globeHemisphereEast, onPressed: () => showImportSite(context)), if (s.can('products.manage')) DkButton('Add product', icon: PhosphorIconsBold.plus, kind: BtnKind.primary, onPressed: () => showDialog<void>(context: context, barrierColor: Colors.black.withValues(alpha: .45), builder: (_) => const _ProductDialog())), DkButton('Refresh', icon: PhosphorIconsRegular.arrowsClockwise, onPressed: () => s.loadProducts().then((_) => s.toast('Stock is up to date')))],
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(24, 0, 24, 14),
@@ -112,7 +113,7 @@ class _ProductCard extends StatelessWidget {
         clipBehavior: Clip.antiAlias,
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           SizedBox(height: 112, width: double.infinity, child: Stack(children: [
-            Positioned.fill(child: ProductArt(kind: p['art'] as String?, size: 400, radius: 0)),
+            Positioned.fill(child: ProductPhoto(image: p['image'] as String?, kind: p['art'] as String?, size: 400, radius: 0)),
             if (best) Positioned(top: 10, left: 10, child: const Tag('Best seller', tone: 'ai', icon: PhosphorIconsFill.star, small: true)),
             if (s.can('products.manage')) Positioned(bottom: 8, right: 8, child: Hover(onTap: () => showDialog<void>(context: context, barrierColor: Colors.black.withValues(alpha: .45), builder: (_) => _ProductDialog(edit: p)), builder: (_, hh, __) => Container(width: 30, height: 30, decoration: BoxDecoration(color: hh ? c.surface : c.surface.withValues(alpha: .85), borderRadius: BorderRadius.circular(9), border: Border.all(color: c.line)), child: Icon(PhosphorIconsRegular.pencilSimple, size: 15, color: c.text2)))),
             Positioned(top: 10, right: 10, child: Tag(st == 'out' ? 'Out of stock' : (st == 'low' ? 'Low stock' : 'In stock'), tone: st == 'ok' ? 'ok' : (st == 'low' ? 'warn' : 'danger'), dot: true, small: true)),

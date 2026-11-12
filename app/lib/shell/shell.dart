@@ -10,6 +10,9 @@ import '../screens/customers.dart';
 import '../screens/inbox.dart';
 import '../screens/insights.dart';
 import '../screens/orders.dart';
+import '../screens/business_ui.dart';
+import '../screens/platform_ui.dart' show ConsoleShell;
+import '../screens/setup_ui.dart';
 import '../screens/team.dart';
 import '../screens/products.dart';
 import '../widgets/kit.dart';
@@ -26,6 +29,8 @@ IconData sectionIcon(Section s, {bool active = false}) {
       Section.connections => PhosphorIconsFill.plugsConnected,
       Section.assistant => PhosphorIconsFill.sparkle,
       Section.team => PhosphorIconsFill.usersThree,
+      Section.setup => PhosphorIconsFill.rocketLaunch,
+      Section.business => PhosphorIconsFill.storefront,
     };
   }
   return switch (s) {
@@ -38,6 +43,8 @@ IconData sectionIcon(Section s, {bool active = false}) {
     Section.connections => PhosphorIconsRegular.plugsConnected,
     Section.assistant => PhosphorIconsRegular.sparkle,
     Section.team => PhosphorIconsRegular.usersThree,
+    Section.setup => PhosphorIconsRegular.rocketLaunch,
+    Section.business => PhosphorIconsRegular.storefront,
   };
 }
 
@@ -59,19 +66,48 @@ class Shell extends StatelessWidget {
       body: LayoutBuilder(builder: (context, box) {
         final w = box.maxWidth;
         final mode = w >= 1180 ? 2 : (w >= 780 ? 1 : 0); // 2 full, 1 rail, 0 bottom
+        final banner = s.isPlatformAdmin ? _SupportBanner(business: '${s.me['business']?['name'] ?? ''}') : null;
         final body = Stack(children: [
           Positioned.fill(child: Padding(padding: EdgeInsets.fromLTRB(mode == 0 ? 0 : 12, mode == 0 ? 0 : 12, mode == 0 ? 0 : 12, mode == 0 ? 0 : 12), child: _Page(section: s.section, compact: mode == 0))),
           Positioned(left: 0, right: 0, bottom: mode == 0 ? 76 : 28, child: Center(child: _Toast(text: s.toastText, error: s.toastError))),
           if (s.offline) const Positioned(top: 0, left: 0, right: 0, child: _OfflineBar()),
         ]);
         if (mode == 0) {
-          return Column(children: [Expanded(child: SafeArea(bottom: false, child: body)), const _BottomNav()]);
+          return Column(children: [if (banner != null) SafeArea(bottom: false, child: banner), Expanded(child: SafeArea(top: banner == null, bottom: false, child: body)), const _BottomNav()]);
         }
         return Row(children: [
           mode == 2 ? const _Sidebar() : const _Rail(),
-          Expanded(child: body),
+          Expanded(child: Column(children: [if (banner != null) banner, Expanded(child: body)])),
         ]);
       }),
+    );
+  }
+}
+
+/// Shown only to a super administrator who has opened a business: a reminder of where they are, and the way back.
+class _SupportBanner extends StatelessWidget {
+  const _SupportBanner({required this.business});
+  final String business;
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final s = context.read<AppState>();
+    return Container(
+      width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: const BoxDecoration(gradient: LinearGradient(colors: [Color(0xFF2B1B6B), Color(0xFF4A2FB8)])),
+      child: Row(children: [
+        Icon(PhosphorIconsFill.shieldCheck, size: 16, color: Colors.white.withValues(alpha: .9)),
+        const SizedBox(width: 10),
+        Expanded(child: Text('Super admin · you are inside $business', style: TypeX.ui(12.5, w: FontWeight.w700, color: Colors.white), maxLines: 1, overflow: TextOverflow.ellipsis)),
+        Hover(
+          onTap: s.openAdminPanel,
+          builder: (_, h, __) => Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            decoration: BoxDecoration(color: Colors.white.withValues(alpha: h ? .24 : .16), borderRadius: BorderRadius.circular(9)),
+            child: Text('Back to super admin panel', style: TypeX.ui(12, w: FontWeight.w800, color: Colors.white)),
+          ),
+        ),
+      ]),
     );
   }
 }
@@ -92,6 +128,8 @@ class _Page extends StatelessWidget {
       Section.connections => const ConnectionsScreen(),
       Section.assistant => const AssistantScreen(),
       Section.team => const TeamScreen(),
+      Section.setup => const SetupScreen(),
+      Section.business => const BusinessScreen(),
     };
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 220),
@@ -137,9 +175,10 @@ class _Sidebar extends StatelessWidget {
         const SizedBox(height: 26),
         Padding(padding: const EdgeInsets.only(left: 10, bottom: 8), child: Text('WORKSPACE', style: TypeX.ui(10.5, w: FontWeight.w800, color: c.inkText.withValues(alpha: .6), ls: 1.1))),
         for (final sec in [Section.inbox, Section.approvals, Section.orders, Section.products, Section.customers]) _NavItem(sec: sec),
+        if (context.watch<AppState>().showSetup) ...[const SizedBox(height: 6), const _NavItem(sec: Section.setup)],
         const SizedBox(height: 18),
         Padding(padding: const EdgeInsets.only(left: 10, bottom: 8), child: Text('GROW & CONFIGURE', style: TypeX.ui(10.5, w: FontWeight.w800, color: c.inkText.withValues(alpha: .6), ls: 1.1))),
-        for (final sec in [Section.insights, Section.connections, Section.assistant, if (context.watch<AppState>().can('team.manage')) Section.team]) _NavItem(sec: sec),
+        for (final sec in [Section.insights, Section.connections, Section.assistant, if (context.watch<AppState>().can('team.manage')) ...[Section.team, Section.business]]) _NavItem(sec: sec),
         const Spacer(),
         const _EngineCard(),
         const SizedBox(height: 12),
@@ -193,7 +232,7 @@ class _EngineCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
     final c = context.c;
-    final claude = s.me['engine'] == 'claude';
+    final claude = s.me['engine'] != null && s.me['engine'] != 'offline';
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(color: Colors.white.withValues(alpha: .06), borderRadius: BorderRadius.circular(14), border: Border.all(color: Colors.white.withValues(alpha: .08))),
@@ -207,7 +246,7 @@ class _EngineCard extends StatelessWidget {
             Row(children: [
               Container(width: 7, height: 7, decoration: BoxDecoration(color: s.offline ? c.danger : const Color(0xFF3DD598), shape: BoxShape.circle)),
               const SizedBox(width: 6),
-              Expanded(child: Text(s.offline ? 'Server offline' : (claude ? 'Claude · live' : 'Offline engine'), style: TypeX.ui(11.5, color: c.inkText), maxLines: 1, overflow: TextOverflow.ellipsis)),
+              Expanded(child: Text(s.offline ? 'Server offline' : (claude ? '${s.me['engineLabel'] ?? 'AI'} · live' : 'Offline engine'), style: TypeX.ui(11.5, color: c.inkText), maxLines: 1, overflow: TextOverflow.ellipsis)),
             ]),
           ]),
         ),
@@ -248,21 +287,24 @@ class _UserRow extends StatelessWidget {
 
 /// Account menu: who you are, change password, sign out.
 class UserMenu extends StatelessWidget {
-  const UserMenu({super.key, required this.child, this.dark = false});
+  const UserMenu({super.key, required this.child, this.dark = false, this.below = false});
   final Widget child;
   final bool dark;
+  final bool below;                            // open the menu under the button (a top bar) instead of above it (the sidebar)
   @override
   Widget build(BuildContext context) {
     final s = context.read<AppState>();
     final c = context.c;
     return PopupMenuButton<String>(
       tooltip: 'Account',
-      offset: const Offset(0, -150),
+      offset: below ? const Offset(0, 46) : const Offset(0, -260),
       color: c.surface, elevation: 12, shadowColor: Colors.black45,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: c.line)),
       onSelected: (v) {
-        if (v == 'pw') { showDialog<void>(context: context, barrierColor: Colors.black.withValues(alpha: .45), builder: (_) => const _PasswordDialog()); }
-        if (v == 'out') s.signOut();
+        if (v == 'admin') { s.openAdminPanel(); return; }
+        if (v == 'pw') { showDialog<void>(context: context, barrierColor: Colors.black.withValues(alpha: .45), builder: (_) => const _PasswordDialog()); return; }
+        if (v == 'out') { s.signOut(); return; }
+        if (v.startsWith('biz:')) { s.switchBusiness(v.substring(4)).then((err) { if (err != null) s.toast(err, error: true); }); }
       },
       itemBuilder: (_) => [
         PopupMenuItem<String>(enabled: false, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -271,6 +313,22 @@ class UserMenu extends StatelessWidget {
           const SizedBox(height: 8),
           Tag(roleLabel(s.role), tone: roleTone(s.role), small: true),
         ])),
+        if (s.isPlatformAdmin) ...[
+          const PopupMenuDivider(),
+          PopupMenuItem<String>(value: 'admin', child: Row(children: [Icon(PhosphorIconsRegular.shieldCheck, size: 18, color: c.primary), const SizedBox(width: 12), Text('Super admin panel', style: TypeX.ui(13.5, w: FontWeight.w700, color: c.primary))])),
+        ],
+        if (s.businesses.length > 1) ...[
+          const PopupMenuDivider(),
+          PopupMenuItem<String>(enabled: false, height: 28, child: Text('BUSINESSES', style: TypeX.ui(10.5, w: FontWeight.w800, color: c.text3, ls: .9))),
+          for (final b in s.businesses)
+            PopupMenuItem<String>(value: 'biz:${b['id']}', child: Row(children: [
+              Icon(b['id'] == s.businessId ? PhosphorIconsFill.checkCircle : PhosphorIconsRegular.storefront, size: 18, color: b['id'] == s.businessId ? c.primary : c.text2),
+              const SizedBox(width: 12),
+              Expanded(child: Text('${b['name']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TypeX.ui(13.5, w: b['id'] == s.businessId ? FontWeight.w800 : FontWeight.w600, color: c.text))),
+              const SizedBox(width: 8),
+              Text('${b['role']}', style: TypeX.ui(11.5, color: c.text3)),
+            ])),
+        ],
         const PopupMenuDivider(),
         PopupMenuItem<String>(value: 'pw', child: Row(children: [Icon(PhosphorIconsRegular.key, size: 18, color: c.text2), const SizedBox(width: 12), Text('Change password', style: TypeX.ui(13.5, w: FontWeight.w600, color: c.text))])),
         PopupMenuItem<String>(value: 'out', child: Row(children: [Icon(PhosphorIconsRegular.signOut, size: 18, color: c.danger), const SizedBox(width: 12), Text('Sign out', style: TypeX.ui(13.5, w: FontWeight.w600, color: c.danger))])),
@@ -346,7 +404,7 @@ class _Rail extends StatelessWidget {
       child: Column(children: [
         const Brand(compact: true),
         const SizedBox(height: 22),
-        for (final sec in Section.values.where((x) => x != Section.team || s.can('team.manage')))
+        for (final sec in Section.values.where((x) => ((x != Section.team && x != Section.business) || s.can('team.manage')) && (x != Section.setup || s.showSetup)))
           Tooltip(
             message: sec.label,
             child: Hover(
@@ -407,7 +465,7 @@ class _BottomNav extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
           child: Wrap(spacing: 10, runSpacing: 10, children: [
-            for (final sec in [Section.products, Section.customers, Section.insights, Section.connections, Section.assistant, if (s.can('team.manage')) Section.team])
+            for (final sec in [if (s.showSetup) Section.setup, Section.products, Section.customers, Section.insights, Section.connections, Section.assistant, if (s.can('team.manage')) ...[Section.team, Section.business]])
               Hover(
                 onTap: () { Navigator.pop(ctx); s.setSection(sec); },
                 builder: (_, h, __) => Container(

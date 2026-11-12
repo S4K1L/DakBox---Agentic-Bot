@@ -7,6 +7,7 @@ import '../core/state.dart';
 import '../widgets/kit.dart';
 import '../widgets/page.dart';
 import 'channels.dart';
+import 'catalog_ui.dart';
 import 'guide_ui.dart';
 import 'providers_ui.dart';
 import 'sms_ui.dart';
@@ -30,7 +31,7 @@ class _ConnectionsScreenState extends State<ConnectionsScreen> {
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
     final c = context.c;
-    int n(String g) => (g == 'Couriers' || g == 'Payments' || g == 'SMS') ? s.providers.where((p) => p['group'] == g && p['live'] == true && p['status'] == 'ok').length : s.integrations.where((i) => i['grp'] == g && i['status'] == 'ok').length;
+    int n(String g) => g == 'Store' ? s.catalogSources.length : (g == 'Couriers' || g == 'Payments' || g == 'SMS') ? s.providers.where((p) => p['group'] == g && p['live'] == true && p['status'] == 'ok').length : s.integrations.where((i) => i['grp'] == g && i['status'] == 'ok').length;
     final issues = s.channels.where((x) => x['status'] != 'ok').length;
     return Panel(
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -67,23 +68,20 @@ class _Providers extends StatelessWidget {
   static const info = {
     'Couriers': 'Book parcels, collect cash on delivery and follow status. The assistant reads tracking from these when customers ask where an order is.',
     'Payments': 'Cash on delivery stays the default in Bangladesh. Mobile wallets and cards are offered as payment links. The assistant never sees a PIN, OTP or card number.',
-    'Store': 'Where products, stock and orders come from.',
+    'Store': 'Where your products come from, and how orders reach Dakbox.',
   };
   @override
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
     final c = context.c;
-    final items = s.integrations.where((i) => i['grp'] == group).toList();
+    final items = s.integrations.where((i) => i['grp'] == group && i['id'] != 'woo' && i['id'] != 'shopify').toList();
     return LayoutBuilder(builder: (context, box) {
       final cols = (box.maxWidth / 320).floor().clamp(1, 3);
       final cw = (box.maxWidth - 48 - 14 * (cols - 1)) / cols;
       return ListView(padding: const EdgeInsets.all(24), children: [
         Text(info[group] ?? '', style: TypeX.ui(13.5, color: c.text2, h: 1.5)),
         const Gap(10),
-        if (group == 'Store') const HowToConnect(steps: ['WooCommerce and Shopify are not connected to the real platforms yet: these cards are demo switches and no keys are stored.', 'Until they are built, add and change products inside Dakbox (Products), and orders come from chats or are created by your team.', 'Orders taken in chat need no connection: the assistant saves them straight into Orders.']),
-        const Gap(6),
-        const Align(alignment: Alignment.centerLeft, child: Tag('Demo only, keys are never stored', tone: 'warn', small: true)),
-        const Gap(16),
+        if (group == 'Store') ...[const CatalogPanel(), const Gap(8), Label('Other ways orders and products arrive'), const Gap(10)],
         Wrap(spacing: 14, runSpacing: 14, children: [
           for (var i = 0; i < items.length; i++)
             SizedBox(width: cw, child: Reveal(delay: i * 40, child: _Provider(p: items[i]))),

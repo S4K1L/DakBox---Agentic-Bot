@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'brand/theme.dart';
 import 'core/state.dart';
 import 'screens/auth.dart';
+import 'screens/platform_ui.dart' show ConsoleShell;
 import 'shell/shell.dart';
 
 void main() {
@@ -50,7 +51,7 @@ class _DakboxAppState extends State<DakboxApp> {
       themeMode: s.themeMode,
       theme: buildTheme(DK.light),
       darkTheme: buildTheme(DK.dark),
-      home: !(s.booted && fontsReady) || s.phase == Phase.loading ? const _Splash() : (s.phase == Phase.ready ? const Shell() : const AuthScreen()),
+      home: !(s.booted && fontsReady) || s.phase == Phase.loading ? const _Splash() : (s.phase == Phase.ready ? (s.inAdmin ? const ConsoleShell() : const Shell()) : const AuthScreen()),
     );
   }
 }

@@ -295,10 +295,12 @@ def explain(e: CheckoutError) -> str:
 
 
 def cancel_restock(o) -> None:
-    """Put a cancelled chat order's units back on the shelf."""
-    if o["source"] != "chat":
+    """Put a cancelled chat or staff order's units back on the shelf."""
+    if o["source"] not in ("chat", "staff", "website"):     # older sample orders never took stock, so they give none back
         return
     for l in db.jl(o["items"], []):
+        if o["source"] == "website" and not l.get("stock"):     # only the lines whose stock Dakbox actually took
+            continue
         db.run("UPDATE products SET stock = stock + ? WHERE sku=?", [l["qty"], l["sku"]])
     emit("products")
 
@@ -323,3 +325,110 @@ async def run_after(conversation_id: str, actions: list[dict]) -> None:
             from .agent.tools import apply_handoff
             apply_handoff(conversation_id, f"payment link for {a['order']}")
             emit("conversation", id=conversation_id)
+
+
+# ---------------------------------------------------------------- orders made by staff
+# A person is accountable for these, so there is no summary/confirm dance and no per-day limit. What stays: live prices, stock taken
+# atomically (never oversold), validated contact details, and the same order, payment and courier flow afterwards.
+MAX_STAFF_UNITS = 500
+MAX_STAFF_TOTAL = 10_000_000
+
+
+def _merge(lines: list[dict]) -> list[dict]:
+    merged: dict[str, int] = {}
+    for l in lines:
+        merged[l["sku"]] = merged.get(l["sku"], 0) + int(l["qty"])
+    return [{"sku": k, "qty": v} for k, v in merged.items()]
+
+
+def staff_quote(lines: list[dict], zone: str, shipping: int | None = None) -> dict:
+    """Live prices, stock problems and delivery for a cart a person is building. Writes nothing."""
+    out, problems = [], []
+    for l in _merge(lines):
+        p = store.product(l["sku"])
+        if not p:
+            problems.append({"code": "unknown_product", "sku": l["sku"]})
+            continue
+        ok = p["stock"] >= l["qty"]
+        if not ok:
+            problems.append({"code": "insufficient_stock", "sku": p["sku"], "name": p["name"], "in_stock": p["stock"], "wanted": l["qty"]})
+        out.append({"sku": p["sku"], "name": p["name"], "variant": p["variant"], "price": p["price"], "qty": l["qty"], "stock": p["stock"], "ok": ok})
+    if not out:
+        problems.append({"code": "cart_empty"})
+    if sum(x["qty"] for x in out) > MAX_STAFF_UNITS:
+        problems.append({"code": "too_many_units", "limit": MAX_STAFF_UNITS})
+    auto = delivery_charge(zone)
+    delivery = auto if shipping is None else shipping
+    sub = sum(x["price"] * x["qty"] for x in out)
+    return {"lines": out, "subtotal": sub, "delivery": delivery, "autoDelivery": auto, "total": sub + delivery, "zone": zone, "problems": problems, "methods": methods()}
+
+
+def _customer_for_staff(customer_id: str | None, name: str | None, phone: str | None):
+    """An existing customer (by id, or the one with this number), or a new one for a walk-in or phone order."""
+    if customer_id:
+        c = store.customer(customer_id)
+        if not c:
+            raise CheckoutError("unknown_customer")
+        return c
+    for r in db.all("SELECT * FROM customers WHERE phone IS NOT NULL AND phone != ''"):
+        if clean_phone(r["phone"]) == phone:
+            return r
+    return store.find_or_create_customer(f"store_{phone}", "store", name or "Customer", phone)
+
+
+def staff_place(*, lines: list[dict], zone: str, name: str | None, phone: str | None, address: str | None, method: str, customer_id: str | None = None,
+                shipping: int | None = None, conversation_id: str | None = None, by: str = "Staff") -> dict:
+    conv = None
+    if conversation_id:
+        conv = store.conversation(conversation_id)
+        if not conv:
+            raise CheckoutError("unknown_conversation")
+        if customer_id and customer_id != conv["customer_id"]:
+            raise CheckoutError("customer_mismatch", hint="That conversation belongs to another customer.")
+        customer_id = conv["customer_id"]
+    existing = store.customer(customer_id) if customer_id else None
+    nm = clean_text(name, 2, 100) if name else (existing["name"] if existing else None)
+    ph = clean_phone(phone) if phone else (clean_phone(existing["phone"]) if existing and existing["phone"] else None)
+    addr = clean_text(address, 10, 250)
+    bad = [f for f, v in (("name", nm), ("phone", ph), ("address", addr)) if not v]
+    if bad:
+        raise CheckoutError("invalid_details", fields=bad, hint={"name": "Name must be 2 to 100 characters.", "phone": "Needs a Bangladesh mobile number like 01712345678.",
+                                                                "address": "Needs a full delivery address (house, road, area), 10 to 250 characters."}[bad[0]])
+    if method not in {m["id"] for m in methods()}:
+        raise CheckoutError("method_unavailable", hint="That payment method is not connected.")
+    q = staff_quote(lines, zone, shipping)
+    if q["problems"]:
+        raise CheckoutError("not_ready", problems=q["problems"])
+    if q["total"] > MAX_STAFF_TOTAL:
+        raise CheckoutError("over_limit", limit=MAX_STAFF_TOTAL)
+    cust = _customer_for_staff(customer_id, nm, ph)
+    label = next(m["label"] for m in methods() if m["id"] == method)
+    kind = store.channel(conv["channel_id"])["kind"] if conv else "store"
+    try:
+        with db.tx():
+            for l in q["lines"]:
+                if db.run("UPDATE products SET stock = stock - ? WHERE sku=? AND stock >= ?", [l["qty"], l["sku"], l["qty"]]).rowcount != 1:
+                    raise CheckoutError("insufficient_stock", sku=l["sku"], name=l["name"])
+            number = _next_number()
+            items = [{"sku": l["sku"], "name": l["name"], "variant": l["variant"], "price": l["price"], "qty": l["qty"]} for l in q["lines"]]
+            db.run("INSERT INTO orders(id,number,customer_id,channel_kind,items,shipping,zone,address,pay_status,pay_method,pay_ref,fulfillment,stage,times,created_at,source,ship_name,ship_phone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   [number, number, cust["id"], kind, db.dumps(items), q["delivery"], zone, addr, "Pending", label, "", "Unfulfilled", 0, db.dumps([db.now()]), db.now(), "staff", nm, ph])
+    except CheckoutError:
+        raise
+    if not (cust["phone"] or "").strip():
+        db.run("UPDATE customers SET phone=? WHERE id=?", [ph, cust["id"]])
+    store.set_tag(cust["id"], "Cart open", False)
+    if conv:                                # the cart became this order: empty it, and drop any summary the assistant was waiting on
+        db.run("UPDATE conversations SET cart='[]' WHERE id=?", [conv["id"]])
+        ck = get(conv["id"])
+        ck.pop("proposal", None)
+        ck["last_order"] = {"hash": None, "number": number}
+        _save(conv["id"], ck)
+        store.add_event(conv["id"], "check", f"Order {number} created by {by}", f"{label} · {taka(q['total'])} · {nm}, {ph}", "ok")
+        emit("conversation", id=conv["id"])
+    emit("orders")
+    emit("products")
+    from . import sms
+    sms.fire(number, "placed", key=f"placed:{number}")
+    return {"order": number, "total": q["total"], "payment_method": label, "delivery": q["delivery"], "customerId": cust["id"],
+            "needsPaymentLink": method != "cod"}

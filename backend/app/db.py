@@ -1,4 +1,12 @@
-"""SQLite access. One connection, used only from the event-loop thread (all handlers are async)."""
+"""SQLite access, one database file per business.
+
+A small registry (registry.py) lists the businesses and where each one's file is. Every call here runs against the file of the *current business*,
+a context variable set by `with db.business(ref):` (and, in later phases, by the request's session and by background jobs).
+With no business selected, a single-business install keeps working: the call uses the default business (the original dakbox.db).
+Set DAKBOX_STRICT_BUSINESS=1 for a hosted, multi-business install: then "no business selected" is an error, never a silent default.
+
+Each connection is used only from the event-loop thread (all handlers are async).
+"""
 from __future__ import annotations
 
 import json
@@ -6,16 +14,35 @@ import os
 import random
 import sqlite3
 import string
+from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
-DB_PATH = os.environ.get("DAKBOX_DB") or str(Path(__file__).resolve().parent.parent / "dakbox.db")
+DB_PATH = os.environ.get("DAKBOX_DB") or str(Path(__file__).resolve().parent.parent / "dakbox.db")      # the default business's file
+DATA_DIR = Path(os.environ.get("DAKBOX_DATA_DIR") or Path(DB_PATH).resolve().parent)                      # registry.db and businesses/ live here
+MAX_OPEN = int(os.environ.get("DAKBOX_MAX_OPEN_DBS") or 64)
 
-_conn = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
-_conn.row_factory = sqlite3.Row
-_conn.execute("PRAGMA journal_mode = WAL")
-_conn.execute("PRAGMA foreign_keys = ON")
+_ctx: ContextVar[str | None] = ContextVar("dakbox_business", default=None)
+_pool: "OrderedDict[str, sqlite3.Connection]" = OrderedDict()
+
+
+class NoBusiness(RuntimeError):
+    """A database call was made with no business selected on a strict (multi-business) install."""
+
+
+def hosted() -> bool:
+    """DAKBOX_HOSTED=1: this install serves other people's businesses. Strict business selection is on by default, the startup checks in hosting.py apply, and no demo data is made."""
+    return os.environ.get("DAKBOX_HOSTED") == "1"
+
+
+def strict() -> bool:
+    """With no business selected, a database call is an error instead of using the original business. Always on when hosted (unless switched off on purpose with DAKBOX_STRICT_BUSINESS=0, which hosting.py refuses)."""
+    v = os.environ.get("DAKBOX_STRICT_BUSINESS")
+    return v == "1" or (hosted() and v != "0")
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS channels (
@@ -86,106 +113,206 @@ CREATE TABLE IF NOT EXISTS audit (
   action TEXT NOT NULL, target TEXT, detail TEXT
 );
 """
-_conn.executescript(SCHEMA)
-_conn.executescript(SCHEMA_AUTH)
+
+
+def _ensure(c: sqlite3.Connection, table: str, col: str, ddl: str) -> None:
+    """Tiny migration helper: add a column to an existing table if it is missing."""
+    cols = [r["name"] for r in c.execute(f"PRAGMA table_info({table})")]
+    if col not in cols:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
 
 def ensure_column(table: str, col: str, ddl: str) -> None:
-    """Tiny migration helper: add a column to an existing table if it is missing."""
-    cols = [r["name"] for r in _conn.execute(f"PRAGMA table_info({table})")]
-    if col not in cols:
-        _conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    _ensure(conn(), table, col, ddl)
 
 
-# Real Meta channels: which account a channel is, how to reach it, and what we last saw from it.
-for _col, _ddl in [
-    ("external_id", "TEXT"),            # WhatsApp phone number ID / Facebook Page ID / Instagram account ID
-    ("config", "TEXT"),                 # JSON: {"via": "...", "waba_id": "..."}
-    ("credentials", "TEXT"),            # encrypted JSON: {"access_token": "..."}
-    ("token_expires_at", "TEXT"),
-    ("last_webhook_at", "TEXT"),
-    ("webhook_count", "INTEGER NOT NULL DEFAULT 0"),
-    ("last_check_at", "TEXT"),
-    ("last_error", "TEXT"),
-    ("verified_name", "TEXT"),
-    ("live", "INTEGER NOT NULL DEFAULT 0"),
-]:
-    ensure_column("channels", _col, _ddl)
-# Courier and payment providers: encrypted credentials live on the integrations row.
-for _col, _ddl in [
-    ("credentials", "TEXT"),            # encrypted JSON of secrets (API keys, passwords, tokens)
-    ("config", "TEXT"),                 # JSON of non-secret settings (mode, base URL, flat delivery charges)
-    ("live", "INTEGER NOT NULL DEFAULT 0"),
-    ("last_check_at", "TEXT"),
-    ("last_error", "TEXT"),
-    ("verified_name", "TEXT"),
-]:
-    ensure_column("integrations", _col, _ddl)
-_conn.executescript("""
-CREATE TABLE IF NOT EXISTS payments (
-  id TEXT PRIMARY KEY, order_number TEXT NOT NULL, provider TEXT NOT NULL, amount INTEGER NOT NULL, currency TEXT NOT NULL DEFAULT 'BDT',
-  tran_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, provider_ref TEXT, link_url TEXT, trx_id TEXT, mode TEXT,
-  created_at TEXT NOT NULL, paid_at TEXT, created_by TEXT, conversation_id TEXT, note TEXT, refunded INTEGER NOT NULL DEFAULT 0, extra TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_pay_order ON payments(order_number);
-CREATE TABLE IF NOT EXISTS payment_refunds (
-  id TEXT PRIMARY KEY, payment_id TEXT NOT NULL REFERENCES payments(id), amount INTEGER NOT NULL, status TEXT NOT NULL,
-  provider_ref TEXT, reason TEXT, created_by TEXT, created_at TEXT NOT NULL, note TEXT, manual INTEGER NOT NULL DEFAULT 0
-);
-""")
-_conn.executescript("""
-CREATE TABLE IF NOT EXISTS sms_messages (
-  id TEXT PRIMARY KEY, order_number TEXT, event TEXT NOT NULL, to_phone TEXT NOT NULL, body TEXT NOT NULL, encoding TEXT, parts INTEGER NOT NULL DEFAULT 1,
-  provider TEXT, provider_ref TEXT, csms TEXT, status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, send_after TEXT NOT NULL,
-  sent_at TEXT, updated_at TEXT, last_report_at TEXT, by_user TEXT, manual INTEGER NOT NULL DEFAULT 0, dedupe_key TEXT UNIQUE
-);
-CREATE INDEX IF NOT EXISTS idx_sms_status ON sms_messages(status, send_after);
-CREATE INDEX IF NOT EXISTS idx_sms_phone ON sms_messages(to_phone, created_at);
-""")
-ensure_column("messages", "external_id", "TEXT")
-ensure_column("conversations", "checkout", "TEXT")
-for _c, _d in (("source", "TEXT"), ("ship_name", "TEXT"), ("ship_phone", "TEXT")):
-    ensure_column("orders", _c, _d)
-_conn.executescript("""
-CREATE TABLE IF NOT EXISTS identities (
-  kind TEXT NOT NULL, external_id TEXT NOT NULL, customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
-  PRIMARY KEY (kind, external_id)
-);
-CREATE INDEX IF NOT EXISTS idx_ident_customer ON identities(customer_id);
-INSERT OR IGNORE INTO identities(kind, external_id, customer_id) SELECT channel_kind, external_id, id FROM customers WHERE external_id IS NOT NULL AND channel_kind IS NOT NULL;
-""")
-_conn.executescript("""
-CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL;
-CREATE TABLE IF NOT EXISTS webhook_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, kind TEXT, account_id TEXT, outcome TEXT NOT NULL, detail TEXT
-);
-""")
+def _init(c: sqlite3.Connection) -> None:
+    """Create or upgrade every table in one business's file. Runs each time a file is opened, so an old file is upgraded when it is first used."""
+    c.executescript(SCHEMA)
+    c.executescript(SCHEMA_AUTH)
+
+
+
+    # Products imported from a website: where each one came from, so a re-sync updates it instead of duplicating it.
+    for _col, _ddl in [("image", "TEXT"), ("source", "TEXT"), ("source_id", "TEXT"), ("source_url", "TEXT"), ("synced_at", "TEXT")]:
+        _ensure(c, "products", _col, _ddl)
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_products_source ON products(source, source_id) WHERE source_id IS NOT NULL")
+    c.execute("""CREATE TABLE IF NOT EXISTS catalog_sources (
+      id TEXT PRIMARY KEY, host TEXT UNIQUE NOT NULL, url TEXT NOT NULL, kind TEXT NOT NULL, default_stock INTEGER NOT NULL DEFAULT 10,
+      currency TEXT, created_at TEXT NOT NULL, last_sync_at TEXT, last_count INTEGER NOT NULL DEFAULT 0, last_note TEXT, last_error TEXT)""")
+
+    for _c, _d in (("order_secret", "TEXT"), ("order_sms", "INTEGER NOT NULL DEFAULT 1"), ("orders_at", "TEXT"), ("orders_count", "INTEGER NOT NULL DEFAULT 0"), ("orders_error", "TEXT")):
+        _ensure(c, "catalog_sources", _c, _d)
+
+    # Real Meta channels: which account a channel is, how to reach it, and what we last saw from it.
+    for _col, _ddl in [
+        ("external_id", "TEXT"),            # WhatsApp phone number ID / Facebook Page ID / Instagram account ID
+        ("config", "TEXT"),                 # JSON: {"via": "...", "waba_id": "..."}
+        ("credentials", "TEXT"),            # encrypted JSON: {"access_token": "..."}
+        ("token_expires_at", "TEXT"),
+        ("last_webhook_at", "TEXT"),
+        ("webhook_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_check_at", "TEXT"),
+        ("last_error", "TEXT"),
+        ("verified_name", "TEXT"),
+        ("live", "INTEGER NOT NULL DEFAULT 0"),
+    ]:
+        _ensure(c, "channels", _col, _ddl)
+    # Courier and payment providers: encrypted credentials live on the integrations row.
+    for _col, _ddl in [
+        ("credentials", "TEXT"),            # encrypted JSON of secrets (API keys, passwords, tokens)
+        ("config", "TEXT"),                 # JSON of non-secret settings (mode, base URL, flat delivery charges)
+        ("live", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_check_at", "TEXT"),
+        ("last_error", "TEXT"),
+        ("verified_name", "TEXT"),
+    ]:
+        _ensure(c, "integrations", _col, _ddl)
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS payments (
+      id TEXT PRIMARY KEY, order_number TEXT NOT NULL, provider TEXT NOT NULL, amount INTEGER NOT NULL, currency TEXT NOT NULL DEFAULT 'BDT',
+      tran_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, provider_ref TEXT, link_url TEXT, trx_id TEXT, mode TEXT,
+      created_at TEXT NOT NULL, paid_at TEXT, created_by TEXT, conversation_id TEXT, note TEXT, refunded INTEGER NOT NULL DEFAULT 0, extra TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pay_order ON payments(order_number);
+    CREATE TABLE IF NOT EXISTS payment_refunds (
+      id TEXT PRIMARY KEY, payment_id TEXT NOT NULL REFERENCES payments(id), amount INTEGER NOT NULL, status TEXT NOT NULL,
+      provider_ref TEXT, reason TEXT, created_by TEXT, created_at TEXT NOT NULL, note TEXT, manual INTEGER NOT NULL DEFAULT 0
+    );
+    """)
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS sms_messages (
+      id TEXT PRIMARY KEY, order_number TEXT, event TEXT NOT NULL, to_phone TEXT NOT NULL, body TEXT NOT NULL, encoding TEXT, parts INTEGER NOT NULL DEFAULT 1,
+      provider TEXT, provider_ref TEXT, csms TEXT, status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, send_after TEXT NOT NULL,
+      sent_at TEXT, updated_at TEXT, last_report_at TEXT, by_user TEXT, manual INTEGER NOT NULL DEFAULT 0, dedupe_key TEXT UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS idx_sms_status ON sms_messages(status, send_after);
+    CREATE INDEX IF NOT EXISTS idx_sms_phone ON sms_messages(to_phone, created_at);
+    """)
+    _ensure(c, "messages", "external_id", "TEXT")
+    _ensure(c, "conversations", "checkout", "TEXT")
+    for _c, _d in (("source", "TEXT"), ("ship_name", "TEXT"), ("ship_phone", "TEXT"),
+                   ("ext_source", "TEXT"), ("ext_id", "TEXT"), ("ext_number", "TEXT"), ("site_total", "INTEGER")):    # orders that arrive from a website
+        _ensure(c, "orders", _c, _d)
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_ext ON orders(ext_source, ext_id) WHERE ext_id IS NOT NULL")
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS identities (
+      kind TEXT NOT NULL, external_id TEXT NOT NULL, customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      PRIMARY KEY (kind, external_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ident_customer ON identities(customer_id);
+    INSERT OR IGNORE INTO identities(kind, external_id, customer_id) SELECT channel_kind, external_id, id FROM customers WHERE external_id IS NOT NULL AND channel_kind IS NOT NULL;
+    """)
+    c.executescript("""
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_ext ON messages(external_id) WHERE external_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS webhook_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, kind TEXT, account_id TEXT, outcome TEXT NOT NULL, detail TEXT
+    );
+    """)
+
+
+
+
+def _open(path: str | Path) -> sqlite3.Connection:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode = WAL")
+    c.execute("PRAGMA foreign_keys = ON")
+    _init(c)
+    return c
+
+
+# ---------------------------------------------------------------- which business is current
+def current() -> str | None:
+    """The id of the business this code is running for, or None."""
+    return _ctx.get()
+
+
+def _resolve() -> str:
+    bid = _ctx.get()
+    if bid:
+        return bid
+    if strict():
+        raise NoBusiness("No business is selected for this database call.")
+    from . import registry
+    return registry.default_id()
+
+
+@contextmanager
+def business(ref: str) -> Iterator[str]:
+    """Run the block for one business (by id or slug). Nests and restores; async code and tasks created inside inherit it."""
+    from . import registry
+    bid = registry.resolve(ref)["id"]
+    tok = _ctx.set(bid)
+    try:
+        yield bid
+    finally:
+        _ctx.reset(tok)
+
+
+def set_business(bid: str) -> None:
+    """Select the business for the rest of this request or task (the request's session decides which; nothing else may call this with a client-supplied value)."""
+    _ctx.set(bid)
+
+
+def conn() -> sqlite3.Connection:
+    bid = _resolve()
+    c = _pool.get(bid)
+    if c is not None:
+        _pool.move_to_end(bid)
+        return c
+    from . import registry
+    c = _open(registry.path_of(bid))
+    _pool[bid] = c
+    while len(_pool) > MAX_OPEN:                      # close the least recently used file; it reopens on next use
+        old, oc = next(iter(_pool.items()))
+        if old == bid:
+            break
+        _pool.pop(old)
+        oc.close()
+    return c
+
+
+def close_business(bid: str) -> None:
+    c = _pool.pop(bid, None)
+    if c is not None:
+        c.close()
+
+
+def close_all() -> None:
+    for bid in list(_pool):
+        close_business(bid)
+
+
+def open_count() -> int:
+    return len(_pool)
 
 
 def all(query: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-    return _conn.execute(query, tuple(params)).fetchall()
+    return conn().execute(query, tuple(params)).fetchall()
 
 
 def get(query: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
-    return _conn.execute(query, tuple(params)).fetchone()
+    return conn().execute(query, tuple(params)).fetchone()
 
 
 def run(query: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
-    return _conn.execute(query, tuple(params))
+    return conn().execute(query, tuple(params))
 
 
 def script(sql: str) -> None:
-    _conn.executescript(sql)
+    conn().executescript(sql)
 
 
 class tx:
     """with tx(): ... commits on success, rolls back on error."""
 
     def __enter__(self):
-        _conn.execute("BEGIN")
+        conn().execute("BEGIN")
 
     def __exit__(self, et, ev, tb):
-        _conn.execute("ROLLBACK" if et else "COMMIT")
+        conn().execute("ROLLBACK" if et else "COMMIT")
         return False
 
 

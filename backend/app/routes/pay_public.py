@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
-from .. import couriers, db, payments, providers_lookup
+from .. import couriers, db, payments, providers_lookup, publicbiz
 
 router = APIRouter()
 _KINDS = {"success", "fail", "cancel", "ipn", "callback"}
@@ -34,14 +34,26 @@ async def _params(request: Request) -> dict:
     return out
 
 
-@router.api_route("/pay/{provider}/{kind}", methods=["GET", "POST"])
-async def gateway(provider: str, kind: str, request: Request):
+async def _gateway(provider: str, kind: str, request: Request):
     if provider not in payments.PROVIDERS or kind not in _KINDS:
         return Response("not found", status_code=404)
     res = await payments.handle_callback(provider, kind, await _params(request))
     if kind == "ipn":
         return PlainTextResponse("OK")  # the gateway only needs a 200
     return RedirectResponse(f"/pay/done?s={res['outcome']}&o={res.get('order') or ''}", status_code=303)
+
+
+# /pay/<slug>/<provider>/<kind> for every business; the original /pay/<provider>/<kind> is the default business.
+@router.api_route("/pay/{slug}/{provider}/{kind}", methods=["GET", "POST"])
+async def gateway_for(slug: str, provider: str, kind: str, request: Request):
+    publicbiz.enter(slug)
+    return await _gateway(provider, kind, request)
+
+
+@router.api_route("/pay/{provider}/{kind}", methods=["GET", "POST"])
+async def gateway(provider: str, kind: str, request: Request):
+    publicbiz.enter(None)
+    return await _gateway(provider, kind, request)
 
 
 @router.get("/pay/done", response_class=HTMLResponse)
@@ -68,8 +80,19 @@ h1{{margin:0 0 8px;font-size:24px}}p{{margin:6px 0;color:#444c72;line-height:1.5
 <body><div class="c"><div class="i">{'✓' if ok else ('✕' if s in ('failed','cancelled') else '…')}</div><h1>{title}</h1><p>{body_en}</p><p>{body_bn}</p>{f'<small>Order {o}</small>' if o else ''}</div></body></html>"""
 
 
+@router.post("/hooks/{slug}/steadfast")
+async def steadfast_hook_for(slug: str, request: Request):
+    publicbiz.enter(slug)
+    return await _steadfast_hook(request)
+
+
 @router.post("/hooks/steadfast")
 async def steadfast_hook(request: Request):
+    publicbiz.enter(None)
+    return await _steadfast_hook(request)
+
+
+async def _steadfast_hook(request: Request):
     secret = (db.jl(providers_lookup.row("steadfast")["config"], {}) or {}).get("webhook_secret") if providers_lookup.row("steadfast") else None
     got = request.headers.get("authorization", "")
     got = got[7:] if got.lower().startswith("bearer ") else ""
